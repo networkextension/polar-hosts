@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>主机 — Polar-</title>
+    <link rel="icon" type="image/svg+xml" href="/assets/polaris-logo.svg" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="lp-page">
+    <div class="lp-app">
+      <aside class="lp-sidebar">
+        <a class="lp-brand" href="/dashboard.html" data-site-brand>
+          <img data-site-icon alt="" />
+          <span class="lp-brand-name" data-site-name>Polar-</span>
+        </a>
+        <nav class="lp-nav">
+          <a class="lp-nav-item" href="/dashboard.html">
+            <span class="lp-nav-icon" data-icon="layout-dashboard">⊞</span><span>Dashboard</span>
+          </a>
+          <a class="lp-nav-item" href="/teams.html">
+            <span class="lp-nav-icon" data-icon="users-round">⌂</span><span data-i18n="nav.teams">工作区</span>
+          </a>
+          <a class="lp-nav-item" href="/posts.html">
+            <span class="lp-nav-icon" data-icon="message-square">◎</span><span>Posts</span>
+          </a>
+          <a class="lp-nav-item" href="/markdowns.html">
+            <span class="lp-nav-icon" data-icon="file-text">◈</span><span>Markdowns</span>
+          </a>
+          <a class="lp-nav-item" href="/rooms.html">
+            <span class="lp-nav-icon" data-icon="users">👥</span><span>群聊</span>
+          </a>
+          <a class="lp-nav-item" href="/chat.html">
+            <span class="lp-nav-icon" data-icon="message-circle">◉</span><span>Chat</span>
+          </a>
+          <a class="lp-nav-item" href="/creation.html">
+            <span class="lp-nav-icon" data-icon="pen-line">✍</span><span data-i18n="nav.creation">Creation</span>
+          </a>
+          <a class="lp-nav-item" href="/video-studio.html">
+            <span class="lp-nav-icon" data-icon="video">▶</span><span data-i18n="nav.videoStudio">Video Studio</span>
+          </a>
+          <a class="lp-nav-item active" href="/hosts.html">
+            <span class="lp-nav-icon" data-icon="server">▣</span><span>主机</span>
+          </a>
+          <a class="lp-nav-item" href="/iosdist.html">
+            <span class="lp-nav-icon" data-icon="smartphone">⬇</span><span data-i18n="nav.iosDist">iOS 分发</span>
+          </a>
+          <a class="lp-nav-item" href="/editor.html">
+            <span class="lp-nav-icon" data-icon="code">✎</span><span>Editor</span>
+          </a>
+          <a class="lp-nav-item" href="/llm-billing.html">
+            <span class="lp-nav-icon" data-icon="dollar-sign">¤</span><span>LLM 计费</span>
+          </a>
+          <a class="lp-nav-item" href="/expense.html">
+            <span class="lp-nav-icon" data-icon="receipt">💰</span><span>家庭账本</span>
+          </a>
+          <a class="lp-nav-item" href="/latch.html" hidden data-admin-nav>
+            <span class="lp-nav-icon" data-icon="settings">⚙</span><span data-i18n="nav.latch">Latch</span>
+          </a>
+          <a class="lp-nav-item" href="/bots.html" hidden data-admin-nav>
+            <span class="lp-nav-icon" data-icon="bot">◉</span><span data-i18n="nav.bots">Bot Management</span>
+          </a>
+          <a class="lp-nav-item" href="/admin-plugins.html" hidden data-admin-nav>
+            <span class="lp-nav-icon" data-icon="puzzle">🧩</span><span>Plugin 注册</span>
+          </a>
+          <a class="lp-nav-item" href="/wg-tokens.html" hidden data-admin-nav>
+            <span class="lp-nav-icon" data-icon="network">🔐</span><span>WG Mesh</span>
+          </a>
+          <a class="lp-nav-item" href="/proxy-tokens.html" hidden data-admin-nav>
+            <span class="lp-nav-icon" data-icon="key">🔑</span><span>API Tokens</span>
+          </a>
+          <a class="lp-nav-item" href="/prompts.html" hidden data-admin-nav>
+            <span class="lp-nav-icon" data-icon="sparkles">✦</span><span>Prompt 模板</span>
+          </a>
+          <a class="lp-nav-item" href="/grafana/" target="_blank" rel="noopener" hidden data-admin-nav>
+            <span class="lp-nav-icon" data-icon="line-chart">📊</span><span>Grafana</span>
+          </a>
+          <a class="lp-nav-item" href="/admin.html" hidden data-admin-nav>
+            <span class="lp-nav-icon" data-icon="users-cog">☍</span><span data-i18n="nav.userAdmin">用户管理</span>
+          </a>
+        </nav>
+        <div class="lp-sidebar-foot">
+          <div class="lp-foot-avatar" id="lpFootAvatar">U</div>
+          <div class="lp-foot-info">
+            <div class="lp-foot-name" id="lpFootName">—</div>
+            <div class="lp-foot-role" id="lpFootRole">—</div>
+          </div>
+          <div class="lp-sidebar-foot-actions">
+            <button class="lp-foot-icon-btn" type="button" data-open-settings-center data-settings-target="personalization" title="Settings" data-i18n-tooltip="nav.settings"><span data-icon="settings"></span></button>
+            <button id="logoutBtn" class="lp-foot-icon-btn" type="button" title="Log out"><span data-icon="log-out"></span></button>
+          </div>
+        </div>
+      </aside>
+
+      <div class="lp-main" style="overflow:hidden;">
+        <div class="lp-topbar">
+          <span class="lp-topbar-title">主机</span>
+          <div class="lp-topbar-end" style="display:flex; align-items:center; gap:8px;">
+            <a class="lp-topbar-back" href="/console.html">▶ 多终端</a>
+            <button id="hostsAddBtn" class="btn-inline btn-secondary" type="button">＋ 注册主机</button>
+            <a class="lp-topbar-back" href="/dashboard.html">Dashboard</a>
+          </div>
+        </div>
+
+        <div class="lp-content" style="padding:0; overflow:hidden; flex:1; display:flex;">
+          <div class="video-studio-layout" style="flex:1; min-height:0;">
+
+            <!-- Left: host list -->
+            <aside class="video-studio-projects">
+              <div class="video-studio-projects-head">
+                <span class="badge">主机列表</span>
+              </div>
+              <div id="hostsList" class="video-studio-project-list">
+                <div class="chat-empty">加载中...</div>
+              </div>
+            </aside>
+
+            <!-- Right: host detail -->
+            <section class="video-studio-detail" id="hostsDetail">
+              <div class="video-studio-empty" id="hostsEmpty">
+                <div class="chat-empty">从左侧选择一台主机查看详情</div>
+              </div>
+
+              <div id="hostsPanel" hidden style="padding:20px; display:flex; flex-direction:column; gap:16px; overflow:auto;">
+                <header style="display:flex; align-items:center; gap:16px;">
+                  <div style="width:56px; height:56px; border-radius:12px; background:linear-gradient(135deg,#e9e9ef,#cfd0d6); display:flex; align-items:center; justify-content:center; font-size:24px; color:#666;">▣</div>
+                  <div style="flex:1; min-width:0;">
+                    <h2 id="hostsName" style="margin:0 0 4px 0; font-size:20px; font-weight:600;">—</h2>
+                    <div style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text-muted,#888); flex-wrap:wrap;">
+                      <span id="hostsStatusBadge" class="settings-value-pill" style="font-size:11px;">—</span>
+                      <span id="hostsOSArch" style="font-family:monospace;">—</span>
+                      <span id="hostsSlug" style="font-family:monospace;">—</span>
+                    </div>
+                  </div>
+                  <button id="hostsDeleteBtn" class="btn-inline" type="button" hidden style="color:#c33;">删除主机</button>
+                </header>
+
+                <section>
+                  <div style="font-weight:600; font-size:13px; margin-bottom:6px;">已上报的能力</div>
+                  <div id="hostsSkillsList" style="display:flex; flex-direction:column; gap:6px;">
+                    <div class="chat-empty">加载中...</div>
+                  </div>
+                  <div style="margin-top:8px; padding:10px; background:var(--surface-muted,#f7f7f9); border-radius:8px; font-size:11px; color:var(--text-muted,#888);">
+                    Phase 0：只展示 agent 上报的能力清单；启用 / 配置 / 启动这些 skill 需要 Phase 1+（coder=P1，shell=P2，proxy/wireguard/kdp=P3-P5）。
+                  </div>
+                </section>
+
+                <section>
+                  <div style="font-weight:600; font-size:13px; margin-bottom:6px;">最后连接</div>
+                  <div id="hostsLastSeen" style="font-size:13px; color:var(--text-muted,#888);">—</div>
+                  <div id="hostsLastSeenIP" style="font-size:11px; color:var(--text-muted,#888); margin-top:4px;">—</div>
+                </section>
+
+                <!-- macmon system metrics — Apple Silicon power/thermal/CPU/GPU
+                     telemetry via macmon (https://github.com/vladkens/macmon).
+                     Renders an iframe to the local Grafana dashboard for darwin
+                     hosts; non-darwin hosts (freebsd, linux) hide the section
+                     entirely since macmon is macOS-only. -->
+                <section id="hostsMetricsSection" hidden>
+                  <div style="display:flex; align-items:baseline; justify-content:space-between; margin-bottom:6px;">
+                    <div style="font-weight:600; font-size:13px;">系统监控 (macmon)</div>
+                    <a id="hostsMetricsOpen" href="#" target="_blank" rel="noopener" style="font-size:11px;">在 Grafana 打开 ↗</a>
+                  </div>
+                  <iframe id="hostsMetricsFrame" style="width:100%; height:560px; border:1px solid var(--border,#333); border-radius:8px; background:#0b0c10;" loading="lazy" referrerpolicy="no-referrer"></iframe>
+                  <div id="hostsMetricsFallback" hidden style="font-size:11px; color:var(--text-muted,#888); margin-top:6px;">
+                    iframe 被浏览器或 Grafana 阻止；点击上方链接在新标签页打开。
+                  </div>
+                </section>
+              </div>
+            </section>
+
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Add Host modal -->
+    <div id="hostsAddModal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop"></div>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="hostsAddModalTitle">
+        <div class="modal-header">
+          <h3 id="hostsAddModalTitle">注册主机</h3>
+          <button id="hostsAddModalCloseBtn" class="btn-inline btn-secondary" type="button">关闭</button>
+        </div>
+        <form id="hostsAddForm" class="modal-body">
+          <label class="form-label" for="hostsAddName">主机名称</label>
+          <input id="hostsAddName" class="input" type="text" required maxlength="60" placeholder="例如：locals-Mac" />
+
+          <div id="hostsAddStatus" class="status-text"></div>
+
+          <div id="hostsAddTokenBox" hidden style="margin-top:12px; padding:12px; background:#0f172a; color:#e2e8f0; border-radius:8px; font-family:monospace; font-size:11px; line-height:1.6; word-break:break-all;">
+            <div style="margin-bottom:6px; color:#94a3b8;">注册命令（仅显示一次，请立刻复制）：</div>
+            <div id="hostsAddTokenSnippet">—</div>
+            <button id="hostsAddCopyBtn" class="btn-inline btn-secondary" type="button" style="margin-top:8px;">复制</button>
+          </div>
+
+          <div class="modal-actions">
+            <button id="hostsAddSubmitBtn" class="btn-secondary" type="submit">生成注册凭证</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script type="module" src="/scripts/hosts.js"></script>
+  </body>
+</html>
