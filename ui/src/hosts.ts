@@ -12,7 +12,7 @@
 // No skill enable / start / stop yet. That's by design; per
 // doc/host-module-dev.md the foundation lands first.
 
-import { fetchCurrentUser, logout } from "./api/session.js";
+import { fetchCurrentUser, logout } from "@networkextension/polar-ui-common/api/session";
 import {
   deleteHost,
   deleteHostSkillCredential,
@@ -24,9 +24,9 @@ import {
   putHostSkillCredential,
   renameHostSkill,
 } from "./api/hosts.js";
-import { byId } from "./lib/dom.js";
-import { hydrateSiteBrand, renderSidebarFoot } from "./lib/site.js";
-import { bindThemeSync, initStoredTheme } from "./lib/theme.js";
+import { byId } from "@networkextension/polar-ui-common/lib/dom";
+import { hydrateSiteBrand, renderSidebarFoot } from "@networkextension/polar-ui-common/lib/site";
+import { bindThemeSync, initStoredTheme } from "@networkextension/polar-ui-common/lib/theme";
 import type { Host, HostSkill, HostSkillCredential } from "./types/hosts.js";
 
 initStoredTheme();

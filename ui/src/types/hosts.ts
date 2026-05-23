@@ -1,7 +1,9 @@
 // Type definitions for the Host module (Phase 0).
 // Mirror the Go-side structs in internal/app/dock/hosts_store.go.
 
-import type { ErrorResponse } from "./dashboard.js";
+// Inlined to break the dock-internal `./dashboard.js` dep that doesn't
+// exist in the extracted repo. Same shape every plugin uses.
+type ErrorResponse = { error?: string };
 
 export type AdvertisedSkill = {
   kind: string;
