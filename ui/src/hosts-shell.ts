@@ -20,6 +20,22 @@ import "@xterm/xterm/css/xterm.css";
 import { openHostShell } from "./api/hosts.js";
 
 const MODAL_ID = "hostShellModal";
+const CSS_LINK_ID = "hostShellXtermCss";
+
+// esbuild emits the imported xterm.css as a side-effect sibling
+// `/scripts/hosts-shell.css`, but does NOT auto-inject a <link> at
+// runtime. Since hosts-shell.js is lazy-loaded, the page-load HTML
+// can't reference the stylesheet either (it doesn't know we exist
+// until the user clicks "Open shell"). Inject the <link> on first
+// call so xterm gets its layout/glyph CSS.
+function ensureXtermCss(): void {
+  if (document.getElementById(CSS_LINK_ID)) return;
+  const link = document.createElement("link");
+  link.id = CSS_LINK_ID;
+  link.rel = "stylesheet";
+  link.href = "/scripts/hosts-shell.css";
+  document.head.appendChild(link);
+}
 
 export interface OpenShellOptions {
   hostId: string;
@@ -32,6 +48,7 @@ export interface OpenShellOptions {
 // dismissed (so the caller doesn't have to await — usually fire and
 // forget).
 export async function openShellModal(opts: OpenShellOptions): Promise<void> {
+  ensureXtermCss();
   const overlay = ensureModalDOM();
   const titleEl = overlay.querySelector<HTMLElement>("[data-shell-title]")!;
   const statusEl = overlay.querySelector<HTMLElement>("[data-shell-status]")!;
