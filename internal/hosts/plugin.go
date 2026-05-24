@@ -212,6 +212,12 @@ func (p *Plugin) RegisterRoutes(r gin.IRouter) {
 	r.GET("/healthz", p.handleHealthz)
 	r.GET("/metrics", p.handleMetricsExposition)
 
+	// Dock-to-plugin internal API. Loopback-only auth — dock dials
+	// the plugin svc directly on 127.0.0.1 and posts skill.advertise
+	// touches here when the WS agent_hub sees an advertise frame.
+	// See internal_touch.go.
+	r.POST("/internal/v1/hosts/touch", p.handleInternalHostTouch)
+
 	// Mirror dock's /api/hosts/* + /api/host-skills/* + /api/console/*
 	// routes so nginx can flip with a single proxy_pass redirect
 	// (see scripts/nginx/hosts-svc-snippet.conf).
