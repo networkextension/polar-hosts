@@ -217,6 +217,9 @@ func (p *Plugin) RegisterRoutes(r gin.IRouter) {
 	// touches here when the WS agent_hub sees an advertise frame.
 	// See internal_touch.go.
 	r.POST("/internal/v1/hosts/touch", p.handleInternalHostTouch)
+	// P3-followup (companion to polar-dock#332): loopback-trusted
+	// catalog lookup. See internal_skill_catalog.go.
+	r.GET("/internal/v1/skill-catalog/:id", p.handleInternalSkillCatalogGet)
 
 	// Mirror dock's /api/hosts/* + /api/host-skills/* + /api/console/*
 	// routes so nginx can flip with a single proxy_pass redirect
