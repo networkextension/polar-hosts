@@ -255,6 +255,14 @@ func (p *Plugin) RegisterRoutes(r gin.IRouter) {
 			auth.POST("/console/layouts", p.handleConsoleLayoutCreate)
 			auth.PATCH("/console/layouts/:layoutId", p.handleConsoleLayoutUpdate)
 			auth.DELETE("/console/layouts/:layoutId", p.handleConsoleLayoutDelete)
+
+			// P0b: skill catalog. List + detail open to any workspace
+			// member; create + retire require admin (checked in handler).
+			auth.GET("/skill-catalog", p.handleSkillCatalogList)
+			auth.POST("/skill-catalog", p.handleSkillCatalogCreate)
+			auth.GET("/skill-catalog/:id", p.handleSkillCatalogGet)
+			auth.POST("/skill-catalog/:id/retire", p.handleSkillCatalogRetire)
+			auth.GET("/skill-catalog/:id/download", p.handleSkillCatalogDownload)
 		}
 	}
 }
