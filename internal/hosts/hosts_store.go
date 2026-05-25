@@ -55,6 +55,11 @@ type AdvertisedSkill struct {
 	Kind         string         `json:"kind"`
 	Version      string         `json:"version,omitempty"`
 	Capabilities map[string]any `json:"capabilities,omitempty"`
+	// P1a additions — agent sends these when the skill came from a
+	// bundle installed via skill.install. Empty for compiled-in skills.
+	Publisher string `json:"publisher,omitempty"`
+	InstallID string `json:"install_id,omitempty"`
+	Source    string `json:"source,omitempty"` // "builtin" | "bundle"
 }
 
 // HostSkill is the persistent counterpart to AdvertisedSkill — the
@@ -72,6 +77,11 @@ type HostSkill struct {
 	CreatedBy  string          `json:"created_by"`
 	CreatedAt  time.Time       `json:"created_at"`
 	UpdatedAt  time.Time       `json:"updated_at"`
+	// P1a additions — empty for older rows that predate the bundle
+	// install path (source defaults to 'builtin' via SQL DEFAULT).
+	Publisher string `json:"publisher,omitempty"`
+	InstallID string `json:"install_id,omitempty"`
+	Source    string `json:"source,omitempty"`
 }
 
 // pendingEnrollmentMarker is the coder_config JSON shape we use to
@@ -239,15 +249,29 @@ func (p *Plugin) ensureHostSkillFromAdvertise(hostID string, skill AdvertisedSki
 		return 0, fmt.Errorf("could not resolve a user_id for host=%s — neither agent_token nor workspace owner", hostID)
 	}
 
+	// P1a: publisher / install_id / source default to '' / '' /
+	// 'builtin' for older agents that don't advertise them; bundle-
+	// installed skills set all three. UPDATE clause keeps them in sync
+	// when the agent re-advertises (e.g. after a fresh install bumps
+	// the install_id).
+	source := strings.TrimSpace(skill.Source)
+	if source == "" {
+		source = "builtin"
+	}
 	var id int64
 	err = p.DB.QueryRow(`
-		INSERT INTO host_skills (host_id, kind, name, config_json, created_by, created_at, updated_at)
-		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $6)
+		INSERT INTO host_skills (host_id, kind, name, config_json, publisher, install_id, source, created_by, created_at, updated_at)
+		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $9)
 		ON CONFLICT (host_id, kind) DO UPDATE
 			SET config_json = EXCLUDED.config_json,
+			    publisher   = EXCLUDED.publisher,
+			    install_id  = EXCLUDED.install_id,
+			    source      = EXCLUDED.source,
 			    updated_at  = EXCLUDED.updated_at
 		RETURNING id`,
-		hostID, kind, name, string(configJSON), createdBy, now,
+		hostID, kind, name, string(configJSON),
+		strings.TrimSpace(skill.Publisher), strings.TrimSpace(skill.InstallID), source,
+		createdBy, now,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("upsert host_skills (host=%s, kind=%s): %w", hostID, kind, err)
