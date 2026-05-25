@@ -52,6 +52,10 @@ func (p *Plugin) handleSkillCatalogList(c *gin.Context) {
 }
 
 func (p *Plugin) handleSkillCatalogGet(c *gin.Context) {
+	workspaceID, ok := requireWorkspaceID(c)
+	if !ok {
+		return
+	}
 	id := strings.TrimSpace(c.Param("id"))
 	if id == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "id required"})
@@ -64,6 +68,13 @@ func (p *Plugin) handleSkillCatalogGet(c *gin.Context) {
 	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	// P3: hide rows the caller's workspace isn't allowed to see. 404
+	// instead of 403 so the existence of workspace-private bundles
+	// from other workspaces doesn't leak.
+	if !e.IsPlatform && e.WorkspaceID != workspaceID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"item": e})
@@ -81,6 +92,15 @@ func (p *Plugin) handleSkillCatalogCreate(c *gin.Context) {
 	var req createSkillCatalogRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json: " + err.Error()})
+		return
+	}
+	// P3: only platform-admin can register is_platform=true rows
+	// (visible to every workspace). Workspace admins still get to
+	// register workspace-scoped rows.
+	if req.IsPlatform && !isPlatformAdminRole(workspaceRole(c)) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "only platform-admin can register is_platform=true rows; omit the flag to scope to your workspace",
+		})
 		return
 	}
 	entry := &SkillCatalogEntry{
@@ -178,6 +198,16 @@ func (p *Plugin) handleSkillCatalogDownload(c *gin.Context) {
 func isAdminRole(role string) bool {
 	switch strings.ToLower(strings.TrimSpace(role)) {
 	case "admin", "owner", "platform-admin":
+		return true
+	}
+	return false
+}
+
+// P3: tighter check for actions whose blast radius spans workspaces
+// (currently: registering is_platform=true catalog rows).
+func isPlatformAdminRole(role string) bool {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "platform-admin", "system":
 		return true
 	}
 	return false
