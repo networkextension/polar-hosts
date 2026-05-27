@@ -179,11 +179,11 @@ func dockAgentRegisterResponder(agentID, hostID, botUserID, token string) http.H
 			return
 		}
 		_ = json.NewEncoder(w).Encode(sdk.AgentRegisterResponse{
-			AgentID:   agentID,
-			HostID:    hostID,
-			BotUserID: botUserID,
-			Token:     token,
-			Server:    "https://zen.4950.store:2443",
+			AgentID:       agentID,
+			HostID:        hostID,
+			BotUserID:     botUserID,
+			AgentTokenRaw: token,
+			Server:        "https://zen.4950.store:2443",
 		})
 	}
 }
@@ -291,7 +291,7 @@ func TestRegisterAgent_DropsRawUUID(t *testing.T) {
 			t.Errorf("dock should receive raw uuid on the wire: %s", body)
 		}
 		_ = json.NewEncoder(w).Encode(sdk.AgentRegisterResponse{
-			AgentID: agentID, HostID: hostID, Token: "polar_agent_x",
+			AgentID: agentID, HostID: hostID, AgentTokenRaw: "polar_agent_x",
 		})
 	})
 	defer cleanup()
