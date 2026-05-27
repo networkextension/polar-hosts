@@ -63,23 +63,29 @@ func (p *Plugin) handleHostLocalBootstrap(c *gin.Context) {
 	}
 
 	var req struct {
-		Name     string `json:"name"`
-		HostOS   string `json:"host_os"`
-		HostArch string `json:"host_arch"`
-		// MachineUUID — see handleHostRegister. Same dedup contract:
-		// non-empty → updateOrInsert by (workspace_id, machine_uuid).
-		MachineUUID string `json:"machine_uuid"`
+		Name           string         `json:"name"`
+		HostOS         string         `json:"host_os"`
+		HostArch       string         `json:"host_arch"`
+		MachineUUIDRaw string         `json:"machine_uuid_raw"`
+		HostInfo       map[string]any `json:"host_info"`
+		BotUserID      string         `json:"bot_user_id"`
 	}
 	_ = c.ShouldBindJSON(&req)
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		name = "localhost"
 	}
+	if strings.TrimSpace(req.MachineUUIDRaw) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "machine_uuid_raw is required (v4)",
+		})
+		return
+	}
 
 	// Pick a bootstrap owner: first user with role='admin'. The
 	// schema doesn't enforce uniqueness on role, so 'first' = lowest
 	// created_at to keep this deterministic across reboots.
-	userID, workspaceID, err := p.pickLocalBootstrapOwner()
+	_, workspaceID, err := p.pickLocalBootstrapOwner()
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusInternalServerError, gin.H{
@@ -92,23 +98,27 @@ func (p *Plugin) handleHostLocalBootstrap(c *gin.Context) {
 	}
 
 	now := time.Now().UTC()
-	rawToken, tok, err := p.createAgentToken(userID, "local-bootstrap "+name, AgentCoderConfig{})
+	result, err := p.registerAgent(RegisterAgentInput{
+		WorkspaceID:    workspaceID,
+		Name:           name,
+		MachineUUIDRaw: req.MachineUUIDRaw,
+		OS:             req.HostOS,
+		Arch:           req.HostArch,
+		BotUserID:      req.BotUserID,
+		HostInfo:       req.HostInfo,
+	}, now)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "mint agent_token: " + err.Error()})
-		return
-	}
-	hostRow, err := p.createOrUpdateHostByMachineUUID(workspaceID, name, tok.ID, req.HostOS, req.HostArch, req.MachineUUID, now)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "create host: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "register: " + err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
-		"host":             hostRow,
-		"agent_token_id":   tok.ID,
-		"agent_token_raw":  rawToken,
-		"workspace_id":     workspaceID,
-		"bootstrap_user":   userID,
+		"agent_id":        result.AgentID,
+		"host_id":         result.HostID,
+		"bot_user_id":     result.BotUserID,
+		"agent_token_raw": result.TokenRaw,
+		"server":          result.Server,
+		"workspace_id":    workspaceID,
 	})
 }
 

@@ -12,11 +12,15 @@ package hosts
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+
+	sdk "github.com/networkextension/polar-sdk"
 )
 
 // pendingEnrollmentMarker is private; the json round-trip below
@@ -151,130 +155,172 @@ func TestSlugSanitizeRegexBehavior(t *testing.T) {
 	}
 }
 
-// TestCreateOrUpdateHost_DedupSameMachineUUID exercises the dedup
-// branch: when the same workspace already has a hosts row with the
-// given machine_uuid, createOrUpdateHostByMachineUUID must UPDATE the
-// existing row (preserving id + slug) rather than INSERT a new one.
-// Dock dual-write is skipped (Dock is nil) so we don't need an HTTP
-// server to mock.
-func TestCreateOrUpdateHost_DedupSameMachineUUID(t *testing.T) {
+// v4 — registerAgent test fixture. Mocks the dock SDK endpoint via
+// httptest + sqlmock for the local mirror writes. See
+// doc/arch/agent-identity-v4.md for the protocol.
+
+func newV4Fixture(t *testing.T, dockHandler http.HandlerFunc) (*Plugin, sqlmock.Sqlmock, func()) {
+	t.Helper()
 	db, mock := newMockDB(t)
-	defer db.Close()
+	srv := httptest.NewServer(dockHandler)
+	dock := sdk.NewClient(srv.URL, "hosts-test", sdk.DeriveHMACKey("polar_plugin_test"))
+	p := &Plugin{DB: db, Dock: dock}
+	cleanup := func() {
+		srv.Close()
+		db.Close()
+	}
+	return p, mock, cleanup
+}
 
-	p := &Plugin{DB: db} // Dock=nil → skip dual-write
+func dockAgentRegisterResponder(agentID, hostID, botUserID, token string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/agents/register" {
+			http.Error(w, "wrong path: "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(sdk.AgentRegisterResponse{
+			AgentID:   agentID,
+			HostID:    hostID,
+			BotUserID: botUserID,
+			Token:     token,
+			Server:    "https://zen.4950.store:2443",
+		})
+	}
+}
 
+// TestRegisterAgent_NewHost: brand-new machine + agent. Dock returns
+// fresh agent_id/host_id; plugin mirrors hosts + agent_tokens + agents.
+func TestRegisterAgent_NewHost(t *testing.T) {
 	const (
-		workspaceID  = "t_root"
-		hostName     = "locals-Mac-2"
-		oldHostID    = "h_existing"
-		oldHostSlug  = "locals-mac-2"
-		newTokenID   = "tok_fresh"
-		machineUUID  = "12345678-90AB-CDEF-1234-567890ABCDEF"
+		workspaceID = "t_root"
+		agentName   = "emei-kimi"
+		agentID     = "ag_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		hostID      = "5f4dcc3b5aa765d61d8327deb882cf99"
+		botUserID   = "bot_fresh"
+		rawToken    = "polar_agent_rawvalueforv4"
 	)
 	now := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
 
-	// 1. getHostByWorkspaceMachineUUID hits the dedup index and finds
-	//    the existing row. Return enough columns to satisfy
-	//    scanHostInto (id, workspace, slug, name, agent_token,
-	//    os, arch, last_seen_ip, advertised_skills, last_seen_at,
-	//    created_at, host_info, host_info_seen_at, machine_uuid).
-	dedupCols := []string{
-		"id", "workspace_id", "slug", "name", "agent_token_id",
-		"os", "arch", "last_seen_ip", "advertised_skills_json",
-		"last_seen_at", "created_at", "host_info_json",
-		"host_info_seen_at", "machine_uuid",
-	}
-	dedupRows := sqlmock.NewRows(dedupCols).
-		AddRow(oldHostID, workspaceID, oldHostSlug, "old-name", "tok_old",
-			"darwin", "arm64", "10.0.0.5", "[]",
-			nil, now.Add(-24*time.Hour), "{}",
-			nil, machineUUID)
-	mock.ExpectQuery(`SELECT .* FROM hosts WHERE workspace_id = \$1 AND machine_uuid = \$2`).
-		WithArgs(workspaceID, machineUUID).
-		WillReturnRows(dedupRows)
+	p, mock, cleanup := newV4Fixture(t, dockAgentRegisterResponder(agentID, hostID, botUserID, rawToken))
+	defer cleanup()
 
-	// 2. UPDATE the existing row.
-	mock.ExpectExec(`UPDATE hosts\s+SET name\s+= \$1,`).
-		WithArgs(hostName, sqlmock.AnyArg(), "darwin", "arm64", oldHostID).
+	// Slug probe (uniqueHostSlugInWorkspace) — no collision.
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM hosts WHERE workspace_id = \$1 AND slug = \$2\)`).
+		WithArgs(workspaceID, "emei-kimi").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+
+	// hosts UPSERT.
+	mock.ExpectExec(`INSERT INTO hosts \(id, workspace_id, slug, name, os, arch, last_seen_at, first_seen_at, created_at\)`).
+		WithArgs(hostID, workspaceID, "emei-kimi", agentName, "darwin", "arm64", now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	// 3. getHostByID reloads the row (returns the updated values).
-	reloadRows := sqlmock.NewRows(dedupCols).
-		AddRow(oldHostID, workspaceID, oldHostSlug, hostName, newTokenID,
-			"darwin", "arm64", "10.0.0.5", "[]",
-			nil, now.Add(-24*time.Hour), "{}",
-			nil, machineUUID)
-	mock.ExpectQuery(`SELECT .* FROM hosts WHERE id = \$1`).
-		WithArgs(oldHostID).
-		WillReturnRows(reloadRows)
+	// mirrorDockAgentTokenForAgent — resolve admin user, then INSERT token row.
+	mock.ExpectQuery(`SELECT u.id FROM users u WHERE u.role = 'admin'`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("u_admin"))
+	mock.ExpectExec(`INSERT INTO agent_tokens`).
+		WithArgs(sqlmock.AnyArg(), "u_admin", "agent:"+agentName, sqlmock.AnyArg(), now).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT id FROM agent_tokens WHERE token_hash = \$1`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("tok_mirror_local"))
 
-	got, err := p.createOrUpdateHostByMachineUUID(
-		workspaceID, hostName, newTokenID, "darwin", "arm64", machineUUID, now,
-	)
+	// agents row insert.
+	mock.ExpectExec(`INSERT INTO agents \(id, workspace_id, host_id, name, bot_user_id, agent_token_id, os, arch, created_at\)`).
+		WithArgs(agentID, workspaceID, hostID, agentName, botUserID, "tok_mirror_local",
+			"darwin", "arm64", now).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	got, err := p.registerAgent(RegisterAgentInput{
+		WorkspaceID:    workspaceID,
+		Name:           agentName,
+		MachineUUIDRaw: "12345678-90AB-CDEF-1234-567890ABCDEF",
+		OS:             "darwin",
+		Arch:           "arm64",
+	}, now)
 	if err != nil {
-		t.Fatalf("createOrUpdate: %v", err)
+		t.Fatalf("registerAgent: %v", err)
 	}
-	if got == nil {
-		t.Fatal("got nil host")
+	if got.AgentID != agentID || got.HostID != hostID || got.BotUserID != botUserID {
+		t.Errorf("response shape: %+v", got)
 	}
-	if got.ID != oldHostID {
-		t.Errorf("expected dedup → existing id %q, got %q", oldHostID, got.ID)
-	}
-	if got.Slug != oldHostSlug {
-		t.Errorf("slug should be preserved across re-register: want %q got %q", oldHostSlug, got.Slug)
-	}
-	if got.Name != hostName {
-		t.Errorf("name should be refreshed: want %q got %q", hostName, got.Name)
-	}
-	if got.MachineUUID != machineUUID {
-		t.Errorf("machine_uuid should round-trip: want %q got %q", machineUUID, got.MachineUUID)
+	if got.TokenRaw != rawToken {
+		t.Errorf("raw token round-trip failed: %q", got.TokenRaw)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("sqlmock expectations: %v", err)
 	}
 }
 
-// TestCreateOrUpdateHost_EmptyMachineUUIDFallsBackToInsert verifies
-// the legacy path: when an older agent (or one whose collector failed)
-// passes an empty machine_uuid, we MUST NOT do a dedup SELECT (no
-// index on empty values, and we don't want to collide unrelated boxes
-// on the empty key). Just INSERT like the pre-PR code.
-func TestCreateOrUpdateHost_EmptyMachineUUIDFallsBackToInsert(t *testing.T) {
-	db, mock := newMockDB(t)
-	defer db.Close()
+// TestRegisterAgent_RejectsEmptyMachineUUID: v4 requires the raw uuid.
+// Legacy empty path is GONE.
+func TestRegisterAgent_RejectsEmptyMachineUUID(t *testing.T) {
+	p := &Plugin{} // no DB / Dock needed; validation rejects first
+	_, err := p.registerAgent(RegisterAgentInput{
+		WorkspaceID:    "t_root",
+		Name:           "legacy-box",
+		MachineUUIDRaw: "",
+	}, time.Now().UTC())
+	if err == nil {
+		t.Fatal("expected error for empty machine_uuid_raw")
+	}
+	if !strings.Contains(err.Error(), "machine_uuid_raw") {
+		t.Errorf("expected error about machine_uuid_raw, got: %v", err)
+	}
+}
 
-	p := &Plugin{DB: db} // Dock=nil
-
+// TestRegisterAgent_DropsRawUUID: assert the raw machine_uuid never
+// touches any SQL — sqlmock fails on unexpected statements, so if a
+// future regression tried to INSERT/UPDATE the value into a column
+// the test would surface it as an unmet expectation.
+func TestRegisterAgent_DropsRawUUID(t *testing.T) {
 	const (
 		workspaceID = "t_root"
-		hostName    = "legacy-box"
+		agentName   = "secret-box"
+		agentID     = "ag_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		hostID      = "deadbeef00112233445566778899aabb"
+		rawUUID     = "SECRET-1234-5678-9ABC-DEFGHIJKLMNO"
 	)
 	now := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
 
-	// Slug uniqueness probe (uniqueHostSlugInWorkspace).
-	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM hosts WHERE workspace_id = \$1 AND slug = \$2\)`).
-		WithArgs(workspaceID, "legacy-box").
-		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	// Dock-side handler asserts the raw uuid IS on the wire (this part
+	// is fine; it's only the persisted side we care about).
+	p, mock, cleanup := newV4Fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 2048)
+		n, _ := r.Body.Read(buf)
+		body := string(buf[:n])
+		if !strings.Contains(body, rawUUID) {
+			t.Errorf("dock should receive raw uuid on the wire: %s", body)
+		}
+		_ = json.NewEncoder(w).Encode(sdk.AgentRegisterResponse{
+			AgentID: agentID, HostID: hostID, Token: "polar_agent_x",
+		})
+	})
+	defer cleanup()
 
-	// INSERT — note machine_uuid is nil (untyped Go nil, lib/pq sends NULL).
-	mock.ExpectExec(`INSERT INTO hosts \(id, workspace_id, slug, name, agent_token_id, os, arch, machine_uuid, created_at\)`).
-		WithArgs(
-			sqlmock.AnyArg(), workspaceID, "legacy-box", hostName,
-			sqlmock.AnyArg(), "linux", "amd64", nil, now,
-		).
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM hosts WHERE workspace_id = \$1 AND slug = \$2\)`).
+		WithArgs(workspaceID, agentName).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectExec(`INSERT INTO hosts`).
+		WithArgs(hostID, workspaceID, agentName, agentName, "", "", now).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT u.id FROM users u WHERE u.role = 'admin'`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("u_admin"))
+	mock.ExpectExec(`INSERT INTO agent_tokens`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT id FROM agent_tokens WHERE token_hash = \$1`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("tok_mirror"))
+	// Note: NO mock expectation referencing rawUUID anywhere. If
+	// registerAgent ever tried to write it to the DB sqlmock would
+	// fail with an unexpected-query error.
+	mock.ExpectExec(`INSERT INTO agents`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	got, err := p.createOrUpdateHostByMachineUUID(
-		workspaceID, hostName, "tok_xyz", "linux", "amd64", "", now,
-	)
+	_, err := p.registerAgent(RegisterAgentInput{
+		WorkspaceID:    workspaceID,
+		Name:           agentName,
+		MachineUUIDRaw: rawUUID,
+	}, now)
 	if err != nil {
-		t.Fatalf("createOrUpdate (empty UUID): %v", err)
-	}
-	if got == nil || !strings.HasPrefix(got.ID, "h_") {
-		t.Errorf("expected new host with h_ prefix, got %+v", got)
-	}
-	if got.MachineUUID != "" {
-		t.Errorf("MachineUUID should remain empty: got %q", got.MachineUUID)
+		t.Fatalf("registerAgent: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("sqlmock expectations: %v", err)

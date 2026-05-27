@@ -81,23 +81,40 @@ CREATE INDEX IF NOT EXISTS idx_hosts_memory_bytes
     ON hosts (((host_info_json ->> 'memory_bytes')::bigint))
     WHERE host_info_json ? 'memory_bytes';
 
--- machine_uuid — stable per-machine fingerprint the agent collects in
--- hostinfo (IOPlatformUUID on darwin, /etc/machine-id on linux, smbios
--- on freebsd). Lets createHost dedup when the same physical box
--- re-registers under a new agent_token (token expired, agent
--- reinstalled, IP changed). Empty / NULL = collector failed; dedup
--- skips so we never collide unrelated machines on an empty key.
-ALTER TABLE hosts
-    ADD COLUMN IF NOT EXISTS machine_uuid TEXT;
+-- ============================================================
+-- Agent Identity v4 (doc/arch/agent-identity-v4.md, 2026-05-27).
+--
+-- v3 (machine_uuid + UNIQUE(workspace_id, machine_uuid)) couldn't
+-- model "one machine, N agents". v4 splits hosts (physical asset,
+-- PK = sha256(salt + raw_uuid)) from agents (logical instance,
+-- PK = ag_<random32hex>, FK → hosts). The dock side runs the
+-- canonical register chain; polar-hosts mirrors the schema +
+-- maintains its local agents row for plugin-side queries.
+-- ============================================================
 
--- Partial unique on (workspace_id, machine_uuid) where non-empty: lets
--- the dedup SELECT in createHost use the index and lets concurrent
--- registers race-safely (the second one hits a unique-violation, the
--- caller falls back to UPDATE). NULL/'' excluded so legacy rows that
--- predate this column don't collide on the empty value.
-CREATE UNIQUE INDEX IF NOT EXISTS uniq_hosts_workspace_machine_uuid
-    ON hosts(workspace_id, machine_uuid)
-    WHERE machine_uuid IS NOT NULL AND machine_uuid <> '';
+DROP INDEX IF EXISTS uniq_hosts_workspace_machine_uuid;
+ALTER TABLE hosts DROP COLUMN IF EXISTS machine_uuid;
+
+ALTER TABLE hosts ADD COLUMN IF NOT EXISTS mem_peak_bytes BIGINT;
+ALTER TABLE hosts ADD COLUMN IF NOT EXISTS cpu_peak_pct   REAL;
+ALTER TABLE hosts ADD COLUMN IF NOT EXISTS first_seen_at  TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+CREATE TABLE IF NOT EXISTS agents (
+    id             TEXT PRIMARY KEY,
+    workspace_id   TEXT NOT NULL,
+    host_id        TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    name           TEXT NOT NULL,
+    bot_user_id    TEXT,
+    agent_token_id TEXT NOT NULL REFERENCES agent_tokens(id) ON DELETE CASCADE,
+    os             TEXT,
+    arch           TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_hello_at  TIMESTAMPTZ,
+    UNIQUE (workspace_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_agents_host      ON agents(host_id);
+CREATE INDEX IF NOT EXISTS idx_agents_workspace ON agents(workspace_id, last_hello_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agents_bot       ON agents(bot_user_id) WHERE bot_user_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS host_skills (
     id BIGSERIAL PRIMARY KEY,

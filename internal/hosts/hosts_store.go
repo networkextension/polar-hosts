@@ -36,6 +36,12 @@ import (
 )
 
 // Host is the API + DB representation of a registered remote machine.
+//
+// v4 (doc/arch/agent-identity-v4.md): the MachineUUID field is gone.
+// New rows' ID is sha256(salt + raw_uuid)[:32] minted by dock from the
+// AgentRegister call; legacy rows keep their h_<random> PK. The
+// agents table provides the logical instance layer with its own
+// ag_<random32hex> identity.
 type Host struct {
 	ID                   string          `json:"id"`
 	WorkspaceID          string          `json:"workspace_id"`
@@ -55,12 +61,22 @@ type Host struct {
 	// agent has been upgraded to a build that ships the hello payload.
 	HostInfo        map[string]any `json:"host_info,omitempty"`
 	HostInfoSeenAt  *time.Time     `json:"host_info_seen_at,omitempty"`
-	// MachineUUID is the stable per-machine fingerprint (darwin
-	// IOPlatformUUID / linux machine-id / freebsd smbios) used by
-	// createHost to dedup a re-register from the same physical box.
-	// Empty when the agent's collector failed or when this row was
-	// created before the column existed.
-	MachineUUID string `json:"machine_uuid,omitempty"`
+}
+
+// Agent is the v4 logical-instance row (one host : N agents).
+// agent.toml on the polar-agent box persists ID and reuses it on
+// every reconnect.
+type Agent struct {
+	ID           string     `json:"id"`             // ag_<random32hex>
+	WorkspaceID  string     `json:"workspace_id"`
+	HostID       string     `json:"host_id"`
+	Name         string     `json:"name"`
+	BotUserID    string     `json:"bot_user_id,omitempty"`
+	AgentTokenID string     `json:"agent_token_id"`
+	OS           string     `json:"os,omitempty"`
+	Arch         string     `json:"arch,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	LastHelloAt  *time.Time `json:"last_hello_at,omitempty"`
 }
 
 // AdvertisedSkill mirrors the agent-side skill descriptor the WS
@@ -114,167 +130,213 @@ const enrollmentTokenTTL = time.Hour
 
 // ---- hosts CRUD --------------------------------------------------------
 
-// createHost is the entry the register handlers call. It is a thin
-// wrapper around createOrUpdateHostByMachineUUID that preserves the
-// pre-PR signature for callers that don't (yet) pass machine_uuid.
-//
-// TODO(#216-phase2): drop the local hosts table and have polar-hosts
-// read hosts back from dock via a new SDK GET surface.
-func (p *Plugin) createHost(workspaceID, name, agentTokenID, hostOS, hostArch string, now time.Time) (*Host, error) {
-	return p.createOrUpdateHostByMachineUUID(workspaceID, name, agentTokenID, hostOS, hostArch, "", now)
+// RegisterAgentInput captures the v4 register payload — collected by the
+// HTTP register handler, passed to registerAgent which chains the
+// dock-side SDK calls + materializes the local hosts + agents rows.
+type RegisterAgentInput struct {
+	WorkspaceID    string
+	Name           string
+	MachineUUIDRaw string
+	OS             string
+	Arch           string
+	BotUserID      string // optional; bind to existing bot when set
+	HostInfo       map[string]any
 }
 
-// createOrUpdateHostByMachineUUID either inserts a new hosts row OR
-// updates an existing one when (workspace_id, machine_uuid) already
-// has a hit. Empty machineUUID means "no fingerprint available" (older
-// agent or collector failed): skip dedup and fall through to legacy
-// INSERT — that matches the pre-PR behavior exactly.
+// RegisterAgentResult is what the register handler returns to the
+// agent CLI — the raw token is shown once (agent persists in
+// agent.toml + we keep only the hash).
+type RegisterAgentResult struct {
+	AgentID   string
+	HostID    string
+	BotUserID string
+	TokenRaw  string
+	Server    string
+}
+
+// registerAgent is the v4 register entry — see
+// doc/arch/agent-identity-v4.md. polar-hosts owns the local agents +
+// hosts rows; dock owns the canonical agent_token, bot_user, and
+// llm_proxy_token writes (we proxy via SDK.AgentRegister).
 //
-// Dual-write to dock follows the same rollback contract as before:
-// on dock-side failure we DELETE the local row so the operator sees
-// one clean error rather than a half-registered host that silently
-// drops skill.advertise. The UPDATE branch doesn't need a rollback
-// (we didn't mutate dock state yet) — dock's matching upsert in
-// /internal/v1/hosts/issue dedups on the same key idempotently.
-func (p *Plugin) createOrUpdateHostByMachineUUID(workspaceID, name, agentTokenID, hostOS, hostArch, machineUUID string, now time.Time) (*Host, error) {
-	workspaceID = strings.TrimSpace(workspaceID)
-	name = strings.TrimSpace(name)
-	if workspaceID == "" || name == "" {
-		return nil, errors.New("workspace_id and name are required")
+// On dock success we mirror the agents row locally so plugin-side
+// joins ("list hosts → agents" UI) don't have to round-trip to dock
+// per request. On dock failure we surface the error — no local row
+// is created so the operator sees a single clean failure.
+func (p *Plugin) registerAgent(in RegisterAgentInput, now time.Time) (*RegisterAgentResult, error) {
+	in.Name = strings.TrimSpace(in.Name)
+	in.WorkspaceID = strings.TrimSpace(in.WorkspaceID)
+	in.MachineUUIDRaw = strings.TrimSpace(in.MachineUUIDRaw)
+	if in.Name == "" || in.WorkspaceID == "" {
+		return nil, errors.New("name and workspace_id required")
 	}
-	machineUUID = strings.TrimSpace(machineUUID)
-	atID := strings.TrimSpace(agentTokenID)
-	osTrim := strings.TrimSpace(hostOS)
-	archTrim := strings.TrimSpace(hostArch)
-
-	// Dedup branch: only when machine_uuid is non-empty. If the box
-	// already has a row for this workspace, repurpose it instead of
-	// minting a new one.
-	if machineUUID != "" {
-		existing, err := p.getHostByWorkspaceMachineUUID(workspaceID, machineUUID)
-		if err != nil {
-			return nil, fmt.Errorf("lookup by machine_uuid: %w", err)
-		}
-		if existing != nil {
-			// Operator may have re-registered with a different name; keep
-			// the old slug stable (it's part of URLs / WS subscription
-			// keys) but refresh name + OS/arch + agent_token + os/arch.
-			var atPtr *string
-			if atID != "" {
-				atPtr = &atID
-			}
-			if _, err := p.DB.Exec(
-				`UPDATE hosts
-				 SET name           = $1,
-				     agent_token_id = $2,
-				     os             = $3,
-				     arch           = $4
-				 WHERE id = $5`,
-				name, atPtr, osTrim, archTrim, existing.ID,
-			); err != nil {
-				return nil, fmt.Errorf("update existing host on re-register: %w", err)
-			}
-			// Dual-write to dock with the same machine_uuid so dock's
-			// matching upsert hits its UPDATE branch (rather than
-			// inserting a duplicate). PR 3 wires the dock side.
-			if p.Dock != nil {
-				if _, derr := p.Dock.IssueHost(sdk.HostIssueRequest{
-					ID:           existing.ID,
-					WorkspaceID:  workspaceID,
-					Slug:         existing.Slug,
-					Name:         name,
-					AgentTokenID: atID,
-					OS:           osTrim,
-					Arch:         archTrim,
-					MachineUUID:  machineUUID,
-				}); derr != nil {
-					// Don't roll back the local UPDATE — the row was
-					// already correct before this call and the dock side
-					// is idempotent on retry. Just surface the error.
-					return nil, fmt.Errorf("dock issue host (dedup update): %w", derr)
-				}
-			}
-			// Refresh + return the updated row.
-			updated, err := p.getHostByID(existing.ID)
-			if err != nil {
-				return nil, fmt.Errorf("reload host after update: %w", err)
-			}
-			return updated, nil
-		}
+	if in.MachineUUIDRaw == "" {
+		return nil, errors.New("machine_uuid_raw required (v4)")
+	}
+	if p.Dock == nil {
+		return nil, errors.New("dock SDK client not initialized")
 	}
 
-	// No existing row (or no machine_uuid to dedup on): mint fresh.
-	slug, err := p.uniqueHostSlugInWorkspace(workspaceID, name)
+	// Single round-trip: dock returns agent_id, host_id, bot_user_id,
+	// token, server. Dock has already INSERTed its own agents +
+	// hosts rows; we mirror them locally below.
+	resp, err := p.Dock.AgentRegister(sdk.AgentRegisterRequest{
+		WorkspaceID:    in.WorkspaceID,
+		Name:           in.Name,
+		MachineUUIDRaw: in.MachineUUIDRaw,
+		HostInfo:       in.HostInfo,
+		OS:             in.OS,
+		Arch:           in.Arch,
+		BotUserID:      in.BotUserID,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("generate slug: %w", err)
+		return nil, fmt.Errorf("dock AgentRegister: %w", err)
 	}
-	host := &Host{
-		ID:          "h_" + generateResourceID(),
-		WorkspaceID: workspaceID,
-		Slug:        slug,
-		Name:        name,
-		OS:          osTrim,
-		Arch:        archTrim,
-		MachineUUID: machineUUID,
-		CreatedAt:   now,
+	if strings.TrimSpace(resp.AgentID) == "" || strings.TrimSpace(resp.HostID) == "" {
+		return nil, errors.New("dock AgentRegister returned empty agent_id/host_id")
 	}
-	if atID != "" {
-		v := atID
-		host.AgentTokenID = &v
-	}
-	// machine_uuid column may be empty TEXT or NULL — we pass through
-	// as-is (the partial unique index excludes empties so duplicate
-	// "" values don't collide).
-	var muPtr any
-	if machineUUID != "" {
-		muPtr = machineUUID
+
+	// Local hosts row mirror. Slug is local-only (URL component); we
+	// use a stable host-<id-prefix> when the operator-chosen name
+	// would collide.
+	slug, slugErr := p.uniqueHostSlugInWorkspace(in.WorkspaceID, in.Name)
+	if slugErr != nil {
+		slug = "host-" + safePrefix(resp.HostID, 8)
 	}
 	if _, err := p.DB.Exec(
-		`INSERT INTO hosts (id, workspace_id, slug, name, agent_token_id, os, arch, machine_uuid, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		host.ID, host.WorkspaceID, host.Slug, host.Name,
-		host.AgentTokenID, host.OS, host.Arch, muPtr, host.CreatedAt,
+		`INSERT INTO hosts (id, workspace_id, slug, name, os, arch, last_seen_at, first_seen_at, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $7)
+		 ON CONFLICT (id) DO UPDATE
+		   SET name         = EXCLUDED.name,
+		       os           = COALESCE(NULLIF(EXCLUDED.os, ''),   hosts.os),
+		       arch         = COALESCE(NULLIF(EXCLUDED.arch, ''), hosts.arch),
+		       last_seen_at = EXCLUDED.last_seen_at`,
+		resp.HostID, in.WorkspaceID, slug, in.Name, in.OS, in.Arch, now,
 	); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("local host upsert: %w", err)
 	}
-	// Dual-write to dock. Rollback the local row on failure so the
-	// register call returns a single clean error instead of leaving a
-	// half-registered host that silently drops its skill.advertise.
-	if p.Dock != nil {
-		if _, derr := p.Dock.IssueHost(sdk.HostIssueRequest{
-			ID:           host.ID,
-			WorkspaceID:  host.WorkspaceID,
-			Slug:         host.Slug,
-			Name:         host.Name,
-			AgentTokenID: atID,
-			OS:           host.OS,
-			Arch:         host.Arch,
-			MachineUUID:  machineUUID,
-		}); derr != nil {
-			if _, rerr := p.DB.Exec(`DELETE FROM hosts WHERE id = $1`, host.ID); rerr != nil {
-				log.Printf("[#216] createHost: dock issue failed AND local rollback failed: dock_err=%v rollback_err=%v host_id=%s", derr, rerr, host.ID)
-			}
-			return nil, fmt.Errorf("dock issue host: %w", derr)
-		}
+
+	// Local agents row mirror — agent_token row exists on dock side,
+	// FK to the local agent_tokens table requires we mirror the token
+	// row first. We mint a placeholder agent_tokens row with the same
+	// id + hash so the FK resolves. dock-side raw token is
+	// authoritative; plugin keeps only the hash.
+	atID, atErr := p.mirrorDockAgentTokenForAgent(resp.HostID, in.Name, in.WorkspaceID, resp.Token, now)
+	if atErr != nil {
+		return nil, fmt.Errorf("mirror agent_token: %w", atErr)
 	}
-	return host, nil
+	if _, err := p.DB.Exec(
+		`INSERT INTO agents (id, workspace_id, host_id, name, bot_user_id, agent_token_id, os, arch, created_at)
+		 VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, NULLIF($7, ''), NULLIF($8, ''), $9)
+		 ON CONFLICT (id) DO UPDATE
+		   SET host_id     = EXCLUDED.host_id,
+		       bot_user_id = COALESCE(EXCLUDED.bot_user_id, agents.bot_user_id),
+		       os          = COALESCE(EXCLUDED.os, agents.os),
+		       arch        = COALESCE(EXCLUDED.arch, agents.arch)`,
+		resp.AgentID, in.WorkspaceID, resp.HostID, in.Name, resp.BotUserID, atID,
+		in.OS, in.Arch, now,
+	); err != nil {
+		return nil, fmt.Errorf("local agent insert: %w", err)
+	}
+
+	return &RegisterAgentResult{
+		AgentID:   resp.AgentID,
+		HostID:    resp.HostID,
+		BotUserID: resp.BotUserID,
+		TokenRaw:  resp.Token,
+		Server:    resp.Server,
+	}, nil
 }
 
-// getHostByWorkspaceMachineUUID returns the row for one machine in one
-// workspace (the dedup key). Backed by the partial unique index
-// uniq_hosts_workspace_machine_uuid declared in hosts-schema.sql.
-// Returns (nil, nil) when no row exists — caller uses that as the
-// "fresh INSERT" signal.
-func (p *Plugin) getHostByWorkspaceMachineUUID(workspaceID, machineUUID string) (*Host, error) {
-	workspaceID = strings.TrimSpace(workspaceID)
-	machineUUID = strings.TrimSpace(machineUUID)
-	if workspaceID == "" || machineUUID == "" {
-		return nil, nil
+// mirrorDockAgentTokenForAgent inserts a local agent_tokens row keyed
+// off the agent name so the FK on the agents table resolves. dock owns
+// the canonical row (with the raw plaintext hashed); we only store the
+// hash + an opaque id. Idempotent on (token_hash).
+func (p *Plugin) mirrorDockAgentTokenForAgent(hostID, agentName, workspaceID, rawToken string, now time.Time) (string, error) {
+	if strings.TrimSpace(rawToken) == "" {
+		// Idempotent register path — dock returned existing agent;
+		// look up the existing token row by agent name pattern.
+		var atID string
+		err := p.DB.QueryRow(
+			`SELECT agent_token_id FROM agents WHERE workspace_id = $1 AND name = $2 LIMIT 1`,
+			workspaceID, agentName,
+		).Scan(&atID)
+		if err == nil && atID != "" {
+			return atID, nil
+		}
+		// Fall through to a stub-row mint if the lookup miss happens.
 	}
-	return p.scanHost(p.DB.QueryRow(
-		hostSelectColumns+` WHERE workspace_id = $1 AND machine_uuid = $2 LIMIT 1`,
-		workspaceID, machineUUID,
-	))
+	id := generateResourceID()
+	hash := ""
+	if strings.TrimSpace(rawToken) != "" {
+		hash = hashAgentToken(rawToken)
+	} else {
+		// Idempotent path: dock didn't return a token. Generate a
+		// stable-but-unused stub so the FK isn't NULL.
+		hash = "v4-stub-" + id
+	}
+	// Resolve the owner_user_id from the workspace's owner so
+	// agent_tokens.user_id is populated.
+	var ownerUserID string
+	if err := p.DB.QueryRow(
+		`SELECT u.id FROM users u WHERE u.role = 'admin' ORDER BY u.created_at LIMIT 1`,
+	).Scan(&ownerUserID); err != nil {
+		return "", fmt.Errorf("resolve owner: %w", err)
+	}
+	if _, err := p.DB.Exec(
+		`INSERT INTO agent_tokens (id, user_id, name, token_hash, coder_config, created_at)
+		 VALUES ($1, $2, $3, $4, '{}'::jsonb, $5)
+		 ON CONFLICT (token_hash) DO NOTHING`,
+		id, ownerUserID, "agent:"+agentName, hash, now,
+	); err != nil {
+		return "", err
+	}
+	// Re-fetch by hash because ON CONFLICT may have skipped the insert.
+	var resolvedID string
+	if err := p.DB.QueryRow(
+		`SELECT id FROM agent_tokens WHERE token_hash = $1 LIMIT 1`, hash,
+	).Scan(&resolvedID); err != nil {
+		return "", err
+	}
+	_ = hostID
+	return resolvedID, nil
+}
+
+// safePrefix returns the first n chars of s, or s if shorter. Used
+// to derive a slug fallback from a host_id without panicking.
+func safePrefix(s string, n int) string {
+	if len(s) < n {
+		return s
+	}
+	return s[:n]
+}
+
+// updateAgentLastHelloAt + updateHostCapacityPeaks are called from the
+// /internal/v1/hosts/hello bridge. The hello frame in v4 carries
+// agent_id (when present) → we bump the agents row's last_hello_at
+// and the host's mem_peak / cpu_peak via GREATEST so the columns only
+// ratchet up. Empty agent_id falls through to the legacy host-only path.
+func (p *Plugin) updateAgentLastHelloAt(agentID string, now time.Time) error {
+	if strings.TrimSpace(agentID) == "" {
+		return nil
+	}
+	_, err := p.DB.Exec(`UPDATE agents SET last_hello_at = $2 WHERE id = $1`, agentID, now)
+	return err
+}
+
+func (p *Plugin) updateHostCapacityPeaks(hostID string, memPeakBytes int64, cpuPeakPct float64, now time.Time) error {
+	if strings.TrimSpace(hostID) == "" {
+		return nil
+	}
+	_, err := p.DB.Exec(
+		`UPDATE hosts
+		 SET mem_peak_bytes = GREATEST(COALESCE(mem_peak_bytes, 0), $2),
+		     cpu_peak_pct   = GREATEST(COALESCE(cpu_peak_pct, 0),   $3),
+		     last_seen_at   = $4
+		 WHERE id = $1`,
+		hostID, memPeakBytes, cpuPeakPct, now,
+	)
+	return err
 }
 
 func (p *Plugin) getHostByID(id string) (*Host, error) {
@@ -355,18 +417,8 @@ func (p *Plugin) updateHostAdvertisedSkills(hostID string, skills []AdvertisedSk
 // lib/pq sends []byte as bytea which cannot cast to jsonb. (Same
 // gotcha bit polar-dock e7d80b9 on plugin_modules.ui_routes.)
 //
-// Side effect: if hostInfoJSON includes a non-empty machine_uuid field,
-// we also backfill the hosts.machine_uuid column. That lets legacy rows
-// (registered before the column existed) become dedup-able as soon as
-// their agent reconnects with an updated build — the column drives
-// the partial unique index, so future re-registers go through the
-// UPDATE branch in createOrUpdateHostByMachineUUID. We deliberately
-// only write the column when:
-//   - the parsed value is non-empty (don't blank an existing UUID), AND
-//   - the row's current machine_uuid is empty (don't churn — if the
-//     column was set, it's the source of truth; an agent re-collect
-//     that returns a different value is a logic-board swap that needs
-//     operator review, not silent rewrite).
+// v4: the machine_uuid backfill side effect is gone — host identity
+// now lives in the PK (sha256(salt + raw_uuid)), not a separate column.
 func (p *Plugin) updateHostInfo(hostID string, hostInfoJSON []byte, seenAt time.Time) (bool, error) {
 	if strings.TrimSpace(hostID) == "" {
 		return false, errors.New("host_id is required")
@@ -386,34 +438,6 @@ func (p *Plugin) updateHostInfo(hostID string, hostInfoJSON []byte, seenAt time.
 		return false, err
 	}
 	n, _ := res.RowsAffected()
-
-	// Best-effort machine_uuid backfill — see comment above.
-	if n > 0 {
-		var parsed struct {
-			MachineUUID string `json:"machine_uuid"`
-		}
-		if jerr := json.Unmarshal([]byte(payload), &parsed); jerr == nil {
-			mu := strings.TrimSpace(parsed.MachineUUID)
-			if mu != "" {
-				// COALESCE-style guard: only write when current column
-				// is empty / NULL. Returning the no-op silently is
-				// fine — n still reflects the host_info update.
-				if _, uerr := p.DB.Exec(
-					`UPDATE hosts SET machine_uuid = $2
-					 WHERE id = $1 AND COALESCE(machine_uuid, '') = ''`,
-					hostID, mu,
-				); uerr != nil {
-					// Log only — never fail the hello path because the
-					// backfill hiccuped. Most likely cause: partial
-					// unique index conflict (another row in the same
-					// workspace already claimed this UUID), which is
-					// exactly the "duplicate hosts to merge" case the
-					// operator will surface via the SQL one-liner.
-					log.Printf("hosts: machine_uuid backfill for %s failed: %v", hostID, uerr)
-				}
-			}
-		}
-	}
 	return n > 0, nil
 }
 
@@ -747,8 +771,7 @@ const hostSelectColumns = `SELECT id, workspace_id, slug, name,
 	    COALESCE(advertised_skills_json::text, '[]'),
 	    last_seen_at, created_at,
 	    COALESCE(host_info_json::text, '{}'),
-	    host_info_seen_at,
-	    COALESCE(machine_uuid, '')
+	    host_info_seen_at
 	  FROM hosts`
 
 // scanHost handles both QueryRow + Query results via the io.Reader-ish
@@ -776,16 +799,14 @@ func scanHostInto(row rowScanner) (*Host, error) {
 	var skillsText string
 	var hostInfoText string
 	var hostInfoSeenAt sql.NullTime
-	var machineUUID string
 	if err := row.Scan(
 		&h.ID, &h.WorkspaceID, &h.Slug, &h.Name,
 		&agentTokenID, &h.OS, &h.Arch, &h.LastSeenIP,
 		&skillsText, &lastSeenAt, &h.CreatedAt,
-		&hostInfoText, &hostInfoSeenAt, &machineUUID,
+		&hostInfoText, &hostInfoSeenAt,
 	); err != nil {
 		return nil, err
 	}
-	h.MachineUUID = machineUUID
 	if agentTokenID.Valid {
 		v := agentTokenID.String
 		h.AgentTokenID = &v
