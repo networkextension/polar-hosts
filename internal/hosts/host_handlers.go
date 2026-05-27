@@ -86,19 +86,29 @@ func (p *Plugin) handleHostRegister(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing bearer token"})
 		return
 	}
+	// v4 — see doc/arch/agent-identity-v4.md. The body now carries
+	// the raw machine_uuid + an optional host_info blob; host_id is
+	// hashed server-side and never persisted raw. machine_uuid_raw
+	// is REQUIRED (legacy "" path is gone post-cutover); reject 400
+	// when missing so the operator hits a clean error instead of a
+	// silent fall-through.
 	var req struct {
-		HostOS   string `json:"host_os"`
-		HostArch string `json:"host_arch"`
-		// MachineUUID — stable per-machine fingerprint the agent
-		// collects in hostinfo (IOPlatformUUID / machine-id / smbios).
-		// Optional: legacy agents that predate the field send "" and
-		// we fall back to the pre-PR INSERT-only path. See createHost.
-		MachineUUID string `json:"machine_uuid"`
+		HostOS         string         `json:"host_os"`
+		HostArch       string         `json:"host_arch"`
+		MachineUUIDRaw string         `json:"machine_uuid_raw"`
+		HostInfo       map[string]any `json:"host_info"`
+		BotUserID      string         `json:"bot_user_id"`
 	}
-	_ = c.ShouldBindJSON(&req) // body optional; agent advertises arch/os via WS later anyway
+	_ = c.ShouldBindJSON(&req)
+	if strings.TrimSpace(req.MachineUUIDRaw) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "machine_uuid_raw is required (v4); update polar-agent or pass --machine-uuid manually",
+		})
+		return
+	}
 
 	now := time.Now().UTC()
-	tokenID, _, workspaceID, hostName, err := p.consumeEnrollmentToken(bearer, now)
+	_, _, workspaceID, hostName, err := p.consumeEnrollmentToken(bearer, now)
 	if err != nil {
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
@@ -112,18 +122,25 @@ func (p *Plugin) handleHostRegister(c *gin.Context) {
 		}
 		return
 	}
-	host, err := p.createOrUpdateHostByMachineUUID(workspaceID, hostName, tokenID, req.HostOS, req.HostArch, req.MachineUUID, now)
+	result, err := p.registerAgent(RegisterAgentInput{
+		WorkspaceID:    workspaceID,
+		Name:           hostName,
+		MachineUUIDRaw: req.MachineUUIDRaw,
+		OS:             req.HostOS,
+		Arch:           req.HostArch,
+		BotUserID:      req.BotUserID,
+		HostInfo:       req.HostInfo,
+	}, now)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法创建 host: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "register: " + err.Error()})
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{
-		"host":           host,
-		"agent_token_id": tokenID,
-		// agent_token raw is the SAME bearer it just used — that
-		// token now becomes its permanent credential. Agent caches it
-		// locally and uses it for all subsequent WS attaches.
-		"agent_token_raw": bearer,
+		"agent_id":        result.AgentID,
+		"host_id":         result.HostID,
+		"bot_user_id":     result.BotUserID,
+		"agent_token_raw": result.TokenRaw,
+		"server":          result.Server,
 	})
 }
 
