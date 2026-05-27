@@ -27,9 +27,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"time"
+
+	sdk "github.com/networkextension/polar-sdk"
 )
 
 // Host is the API + DB representation of a registered remote machine.
@@ -105,6 +108,15 @@ const enrollmentTokenTTL = time.Hour
 
 // ---- hosts CRUD --------------------------------------------------------
 
+// createHost inserts the new host row + dual-writes to dock (task #216).
+// See createEnrollmentToken for the same dual-write / rollback contract.
+// Without the dock write, dock's getHostByAgentToken (called once per
+// /ws/agent attach) returns nil and the agent shows up online but with
+// "skill.advertise has no host row (legacy agent), dropping" — hardware
+// facts never populate.
+//
+// TODO(#216-phase2): drop the local hosts table and have polar-hosts
+// read hosts back from dock via a new SDK GET surface.
 func (p *Plugin) createHost(workspaceID, name, agentTokenID, hostOS, hostArch string, now time.Time) (*Host, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
 	name = strings.TrimSpace(name)
@@ -135,6 +147,29 @@ func (p *Plugin) createHost(workspaceID, name, agentTokenID, hostOS, hostArch st
 		host.AgentTokenID, host.OS, host.Arch, host.CreatedAt,
 	); err != nil {
 		return nil, err
+	}
+	// Dual-write to dock. Rollback the local row on failure so the
+	// register call returns a single clean error instead of leaving a
+	// half-registered host that silently drops its skill.advertise.
+	if p.Dock != nil {
+		var atID string
+		if host.AgentTokenID != nil {
+			atID = *host.AgentTokenID
+		}
+		if _, derr := p.Dock.IssueHost(sdk.HostIssueRequest{
+			ID:           host.ID,
+			WorkspaceID:  host.WorkspaceID,
+			Slug:         host.Slug,
+			Name:         host.Name,
+			AgentTokenID: atID,
+			OS:           host.OS,
+			Arch:         host.Arch,
+		}); derr != nil {
+			if _, rerr := p.DB.Exec(`DELETE FROM hosts WHERE id = $1`, host.ID); rerr != nil {
+				log.Printf("[#216] createHost: dock issue failed AND local rollback failed: dock_err=%v rollback_err=%v host_id=%s", derr, rerr, host.ID)
+			}
+			return nil, fmt.Errorf("dock issue host: %w", derr)
+		}
 	}
 	return host, nil
 }
@@ -448,6 +483,16 @@ func (p *Plugin) deleteHost(hostID string) error {
 // row (so the agent WS handshake doesn't need a special code path) but
 // marked pending via coder_config so consumeEnrollmentToken can
 // distinguish from a fully-registered token.
+//
+// Task #216 (split-brain fix): after the local INSERT we dual-write to
+// dock via SDK.IssueAgentToken so the canonical row also lands in
+// ideamesh.agent_tokens — without that, dock's /ws/agent auth
+// (resolveAgentToken) 401s on the agent's first connect. If the SDK
+// call fails we roll back the local row so the two DBs stay in sync.
+//
+// TODO(#216-phase2): once we're confident in the dual-write path, drop
+// the local agent_tokens table and have polar-hosts read tokens back
+// from dock via a new SDK GET surface.
 func (p *Plugin) createEnrollmentToken(userID, workspaceID, hostName string, now time.Time) (string, string, time.Time, error) {
 	userID = strings.TrimSpace(userID)
 	workspaceID = strings.TrimSpace(workspaceID)
@@ -471,12 +516,30 @@ func (p *Plugin) createEnrollmentToken(userID, workspaceID, hostName string, now
 		return "", "", time.Time{}, err
 	}
 	tokenID := generateResourceID()
+	tokenName := "enroll:" + hostName
 	if _, err := p.DB.Exec(
 		`INSERT INTO agent_tokens (id, user_id, name, token_hash, coder_config, created_at)
 		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		tokenID, userID, "enroll:"+hostName, hashHex, string(markerJSON), now,
+		tokenID, userID, tokenName, hashHex, string(markerJSON), now,
 	); err != nil {
 		return "", "", time.Time{}, err
+	}
+	// Dual-write to dock. On failure roll back the local row so the
+	// operator sees one clean error rather than a half-registered token
+	// that silently 401s its agent later.
+	if p.Dock != nil {
+		if _, derr := p.Dock.IssueAgentToken(sdk.AgentTokenIssueRequest{
+			ID:              tokenID,
+			UserID:          userID,
+			Name:            tokenName,
+			TokenHash:       hashHex,
+			CoderConfigJSON: string(markerJSON),
+		}); derr != nil {
+			if _, rerr := p.DB.Exec(`DELETE FROM agent_tokens WHERE id = $1`, tokenID); rerr != nil {
+				log.Printf("[#216] createEnrollmentToken: dock issue failed AND local rollback failed: dock_err=%v rollback_err=%v token_id=%s", derr, rerr, tokenID)
+			}
+			return "", "", time.Time{}, fmt.Errorf("dock issue agent_token: %w", derr)
+		}
 	}
 	return tokenID, raw, expiresAt, nil
 }
