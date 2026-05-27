@@ -61,6 +61,26 @@ CREATE INDEX IF NOT EXISTS idx_hosts_last_seen ON hosts(last_seen_at DESC);
 CREATE INDEX IF NOT EXISTS idx_hosts_agent_token
     ON hosts(agent_token_id) WHERE agent_token_id IS NOT NULL;
 
+-- polar-dock#351 — host hello payload (static facts the agent learns at
+-- attach time: virt, memory_bytes, cpu_model, kernel, etc.). Written by
+-- POST /internal/v1/hosts/hello whenever a polar-agent (re)connects.
+-- Kept JSONB so we can grow the schema agent-side without round-tripping
+-- a column add through dock.
+ALTER TABLE hosts
+    ADD COLUMN IF NOT EXISTS host_info_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS host_info_seen_at TIMESTAMPTZ;
+
+-- Indexes for the host-list filter bar planned in the UI: virt grouping
+-- (kvm / vmware / none) + memory bucketing. Partial-index on key
+-- presence keeps the index from bloating with rows whose agent hasn't
+-- ever sent a hello yet.
+CREATE INDEX IF NOT EXISTS idx_hosts_virt
+    ON hosts ((host_info_json ->> 'virt'))
+    WHERE host_info_json ? 'virt';
+CREATE INDEX IF NOT EXISTS idx_hosts_memory_bytes
+    ON hosts (((host_info_json ->> 'memory_bytes')::bigint))
+    WHERE host_info_json ? 'memory_bytes';
+
 CREATE TABLE IF NOT EXISTS host_skills (
     id BIGSERIAL PRIMARY KEY,
     host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,

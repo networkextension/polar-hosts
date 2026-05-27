@@ -217,6 +217,10 @@ func (p *Plugin) RegisterRoutes(r gin.IRouter) {
 	// touches here when the WS agent_hub sees an advertise frame.
 	// See internal_touch.go.
 	r.POST("/internal/v1/hosts/touch", p.handleInternalHostTouch)
+	// polar-dock#351: separate channel for the static host_info blob
+	// (virt, memory_bytes, cpu_model, …) the agent sends in its hello
+	// frame on (re)connect. See internal_hello.go.
+	r.POST("/internal/v1/hosts/hello", p.handleInternalHostsHello)
 	// P3-followup (companion to polar-dock#332): loopback-trusted
 	// catalog lookup. See internal_skill_catalog.go.
 	r.GET("/internal/v1/skill-catalog/:id", p.handleInternalSkillCatalogGet)
