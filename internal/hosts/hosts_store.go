@@ -61,6 +61,15 @@ type Host struct {
 	// agent has been upgraded to a build that ships the hello payload.
 	HostInfo        map[string]any `json:"host_info,omitempty"`
 	HostInfoSeenAt  *time.Time     `json:"host_info_seen_at,omitempty"`
+	// v4 capacity peaks — agent samples since last hello, ratcheted up
+	// via GREATEST in updateHostCapacityPeaks. Nullable in DB; surface as
+	// pointers so UI can show "—" for never-sampled rows.
+	MemPeakBytes *int64   `json:"mem_peak_bytes,omitempty"`
+	CPUPeakPct   *float64 `json:"cpu_peak_pct,omitempty"`
+	// v4 derived count — number of agents rows pointing at this host.
+	// Populated on /api/hosts (LEFT JOIN COUNT); 0 for hosts pre-agent
+	// model or single-host scans that skip the join.
+	AgentsCount int `json:"agents_count"`
 }
 
 // Agent is the v4 logical-instance row (one host : N agents).
@@ -77,6 +86,36 @@ type Agent struct {
 	Arch         string     `json:"arch,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
 	LastHelloAt  *time.Time `json:"last_hello_at,omitempty"`
+}
+
+// AgentListItem is the row shape returned by /api/agents +
+// /api/agents/:id + /api/hosts/:id/agents. Joined with hosts so the
+// UI can render "agent on host <name>" without a fan-out call.
+//
+// Wire-shape contract (Phase F UI relies on these exact names):
+//
+//   - agent_token_id_suffix is the LAST 8 chars of agent_token_id
+//     (the opaque row id, NOT the raw bearer). The raw bearer is shown
+//     once at register time and only the sha256 hash is persisted; the
+//     suffix here is a stable display fingerprint that does NOT leak
+//     the bearer or enable replay.
+//
+//   - host_name is hosts.name (operator-chosen label); host_hw_model
+//     is extracted from hosts.host_info_json (the agent hello payload).
+//     Either may be empty for a never-said-hello host.
+type AgentListItem struct {
+	ID                   string  `json:"id"`
+	WorkspaceID          string  `json:"workspace_id"`
+	HostID               string  `json:"host_id"`
+	HostName             string  `json:"host_name,omitempty"`
+	HostHWModel          string  `json:"host_hw_model,omitempty"`
+	Name                 string  `json:"name"`
+	BotUserID            string  `json:"bot_user_id,omitempty"`
+	AgentTokenIDSuffix   string  `json:"agent_token_id_suffix"`
+	OS                   string  `json:"os,omitempty"`
+	Arch                 string  `json:"arch,omitempty"`
+	CreatedAt            string  `json:"created_at"`
+	LastHelloAt          *string `json:"last_hello_at,omitempty"`
 }
 
 // AdvertisedSkill mirrors the agent-side skill descriptor the WS
@@ -375,6 +414,102 @@ func (p *Plugin) listHostsForWorkspace(workspaceID string) ([]Host, error) {
 		out = append(out, *h)
 	}
 	return out, rows.Err()
+}
+
+// ---- agents read helpers (v4) -----------------------------------------
+//
+// All three helpers materialize AgentListItem rows (joined with hosts
+// for host_name + host_hw_model). The joins are on agents.host_id =
+// hosts.id, backed by the idx_agents_host index + hosts(id) PK; cost is
+// constant per row regardless of workspace size.
+//
+// agent_token_id_suffix is computed in SQL via RIGHT(at.id, 8) so the
+// raw bearer never crosses the wire — at.id is the opaque row id, not
+// the plaintext token. See AgentListItem doc for the security rationale.
+
+const agentSelectColumns = `
+	SELECT a.id, a.workspace_id, a.host_id,
+	       COALESCE(h.name, ''),
+	       COALESCE(h.host_info_json->>'hw_model', ''),
+	       a.name,
+	       COALESCE(a.bot_user_id, ''),
+	       RIGHT(a.agent_token_id, 8),
+	       COALESCE(a.os, ''),
+	       COALESCE(a.arch, ''),
+	       a.created_at,
+	       a.last_hello_at
+	  FROM agents a
+	  LEFT JOIN hosts h ON h.id = a.host_id`
+
+func (p *Plugin) scanAgentList(rows *sql.Rows) ([]AgentListItem, error) {
+	defer rows.Close()
+	out := []AgentListItem{}
+	for rows.Next() {
+		it, err := scanAgentListRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *it)
+	}
+	return out, rows.Err()
+}
+
+func scanAgentListRow(row rowScanner) (*AgentListItem, error) {
+	var it AgentListItem
+	var lastHello sql.NullTime
+	var createdAt sql.NullTime
+	if err := row.Scan(
+		&it.ID, &it.WorkspaceID, &it.HostID,
+		&it.HostName, &it.HostHWModel,
+		&it.Name, &it.BotUserID, &it.AgentTokenIDSuffix,
+		&it.OS, &it.Arch,
+		&createdAt, &lastHello,
+	); err != nil {
+		return nil, err
+	}
+	if createdAt.Valid {
+		it.CreatedAt = createdAt.Time.UTC().Format("2006-01-02T15:04:05Z")
+	}
+	if lastHello.Valid {
+		v := lastHello.Time.UTC().Format("2006-01-02T15:04:05Z")
+		it.LastHelloAt = &v
+	}
+	return &it, nil
+}
+
+// listAgents returns every agents row in the workspace, ordered by
+// most-recent-hello-first. Empty slice (never nil) on no match.
+func (p *Plugin) listAgents(workspaceID string) ([]AgentListItem, error) {
+	rows, err := p.DB.Query(
+		agentSelectColumns+` WHERE a.workspace_id = $1
+		 ORDER BY a.last_hello_at DESC NULLS LAST, a.created_at DESC`,
+		workspaceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return p.scanAgentList(rows)
+}
+
+// getAgent resolves a single agent by id. Returns (nil, sql.ErrNoRows)
+// when the id is unknown so the handler can produce a clean 404.
+func (p *Plugin) getAgent(agentID string) (*AgentListItem, error) {
+	row := p.DB.QueryRow(agentSelectColumns+` WHERE a.id = $1`, agentID)
+	return scanAgentListRow(row)
+}
+
+// listAgentsByHost returns the agents attached to one host row.
+// Ordering matches listAgents so the UI sees a consistent shape.
+func (p *Plugin) listAgentsByHost(hostID string) ([]AgentListItem, error) {
+	rows, err := p.DB.Query(
+		agentSelectColumns+` WHERE a.host_id = $1
+		 ORDER BY a.last_hello_at DESC NULLS LAST, a.created_at DESC`,
+		hostID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return p.scanAgentList(rows)
 }
 
 // updateHostAdvertisedSkills replaces the JSON snapshot and bumps
@@ -765,13 +900,26 @@ var (
 
 // ---- internals ---------------------------------------------------------
 
+// hostSelectColumns surfaces every column the UI needs in one round
+// trip. v4 additions: mem_peak_bytes + cpu_peak_pct (24h capacity
+// ratchets, populated by /internal/v1/hosts/hello) and a derived
+// agents_count via a correlated subquery (LEFT JOIN COUNT was the
+// alternative; subquery keeps the query plan flat — Postgres
+// hash-joins the agents row group on host_id in either case, and the
+// subquery avoids changing the row cardinality of the outer SELECT
+// so a row-at-a-time getHostByID path works without GROUP BY
+// gymnastics). agents.host_id is indexed (idx_agents_host) so the
+// subquery is an index lookup per row, not a seqscan.
 const hostSelectColumns = `SELECT id, workspace_id, slug, name,
 	    agent_token_id, COALESCE(os, ''), COALESCE(arch, ''),
 	    COALESCE(last_seen_ip, ''),
 	    COALESCE(advertised_skills_json::text, '[]'),
 	    last_seen_at, created_at,
 	    COALESCE(host_info_json::text, '{}'),
-	    host_info_seen_at
+	    host_info_seen_at,
+	    mem_peak_bytes,
+	    cpu_peak_pct,
+	    (SELECT COUNT(*) FROM agents a WHERE a.host_id = hosts.id) AS agents_count
 	  FROM hosts`
 
 // scanHost handles both QueryRow + Query results via the io.Reader-ish
@@ -799,14 +947,27 @@ func scanHostInto(row rowScanner) (*Host, error) {
 	var skillsText string
 	var hostInfoText string
 	var hostInfoSeenAt sql.NullTime
+	var memPeakBytes sql.NullInt64
+	var cpuPeakPct sql.NullFloat64
+	var agentsCount int64
 	if err := row.Scan(
 		&h.ID, &h.WorkspaceID, &h.Slug, &h.Name,
 		&agentTokenID, &h.OS, &h.Arch, &h.LastSeenIP,
 		&skillsText, &lastSeenAt, &h.CreatedAt,
 		&hostInfoText, &hostInfoSeenAt,
+		&memPeakBytes, &cpuPeakPct, &agentsCount,
 	); err != nil {
 		return nil, err
 	}
+	if memPeakBytes.Valid {
+		v := memPeakBytes.Int64
+		h.MemPeakBytes = &v
+	}
+	if cpuPeakPct.Valid {
+		v := cpuPeakPct.Float64
+		h.CPUPeakPct = &v
+	}
+	h.AgentsCount = int(agentsCount)
 	if agentTokenID.Valid {
 		v := agentTokenID.String
 		h.AgentTokenID = &v

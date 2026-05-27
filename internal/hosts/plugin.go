@@ -242,6 +242,14 @@ func (p *Plugin) RegisterRoutes(r gin.IRouter) {
 			auth.GET("/hosts/:id", p.handleHostDetail)
 			auth.DELETE("/hosts/:id", p.handleHostDelete)
 
+			// Agent Identity v4 read endpoints. See
+			// doc/arch/agent-identity-v4.md + agents_handlers.go.
+			// Workspace-member auth (mutations e.g. kick live on dock
+			// because they need the in-memory agent_hub registry).
+			auth.GET("/agents", p.handleListAgents)
+			auth.GET("/agents/:id", p.handleGetAgent)
+			auth.GET("/hosts/:id/agents", p.handleListAgentsByHost)
+
 			auth.GET("/host-skills", p.handleHostSkillsListWorkspace)
 			auth.GET("/hosts/:id/skills", p.handleHostSkillsListForHost)
 			auth.PATCH("/hosts/:id/skills/:skillId", p.handleHostSkillRename)
