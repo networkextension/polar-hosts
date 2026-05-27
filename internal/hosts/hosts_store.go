@@ -260,7 +260,7 @@ func (p *Plugin) registerAgent(in RegisterAgentInput, now time.Time) (*RegisterA
 	// row first. We mint a placeholder agent_tokens row with the same
 	// id + hash so the FK resolves. dock-side raw token is
 	// authoritative; plugin keeps only the hash.
-	atID, atErr := p.mirrorDockAgentTokenForAgent(resp.HostID, in.Name, in.WorkspaceID, resp.Token, now)
+	atID, atErr := p.mirrorDockAgentTokenForAgent(resp.HostID, in.Name, in.WorkspaceID, resp.AgentTokenRaw, now)
 	if atErr != nil {
 		return nil, fmt.Errorf("mirror agent_token: %w", atErr)
 	}
@@ -282,7 +282,7 @@ func (p *Plugin) registerAgent(in RegisterAgentInput, now time.Time) (*RegisterA
 		AgentID:   resp.AgentID,
 		HostID:    resp.HostID,
 		BotUserID: resp.BotUserID,
-		TokenRaw:  resp.Token,
+		TokenRaw:  resp.AgentTokenRaw,
 		Server:    resp.Server,
 	}, nil
 }
