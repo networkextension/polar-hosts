@@ -6,7 +6,7 @@ require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/gorilla/websocket v1.5.1
 	github.com/lib/pq v1.12.3
-	github.com/networkextension/polar-sdk v0.1.0
+	github.com/networkextension/polar-sdk v0.2.0
 	github.com/prometheus/client_golang v1.23.2
 )
 
