@@ -66,6 +66,9 @@ func (p *Plugin) handleHostLocalBootstrap(c *gin.Context) {
 		Name     string `json:"name"`
 		HostOS   string `json:"host_os"`
 		HostArch string `json:"host_arch"`
+		// MachineUUID — see handleHostRegister. Same dedup contract:
+		// non-empty → updateOrInsert by (workspace_id, machine_uuid).
+		MachineUUID string `json:"machine_uuid"`
 	}
 	_ = c.ShouldBindJSON(&req)
 	name := strings.TrimSpace(req.Name)
@@ -94,7 +97,7 @@ func (p *Plugin) handleHostLocalBootstrap(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "mint agent_token: " + err.Error()})
 		return
 	}
-	hostRow, err := p.createHost(workspaceID, name, tok.ID, req.HostOS, req.HostArch, now)
+	hostRow, err := p.createOrUpdateHostByMachineUUID(workspaceID, name, tok.ID, req.HostOS, req.HostArch, req.MachineUUID, now)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "create host: " + err.Error()})
 		return

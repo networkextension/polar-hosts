@@ -81,6 +81,24 @@ CREATE INDEX IF NOT EXISTS idx_hosts_memory_bytes
     ON hosts (((host_info_json ->> 'memory_bytes')::bigint))
     WHERE host_info_json ? 'memory_bytes';
 
+-- machine_uuid — stable per-machine fingerprint the agent collects in
+-- hostinfo (IOPlatformUUID on darwin, /etc/machine-id on linux, smbios
+-- on freebsd). Lets createHost dedup when the same physical box
+-- re-registers under a new agent_token (token expired, agent
+-- reinstalled, IP changed). Empty / NULL = collector failed; dedup
+-- skips so we never collide unrelated machines on an empty key.
+ALTER TABLE hosts
+    ADD COLUMN IF NOT EXISTS machine_uuid TEXT;
+
+-- Partial unique on (workspace_id, machine_uuid) where non-empty: lets
+-- the dedup SELECT in createHost use the index and lets concurrent
+-- registers race-safely (the second one hits a unique-violation, the
+-- caller falls back to UPDATE). NULL/'' excluded so legacy rows that
+-- predate this column don't collide on the empty value.
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_hosts_workspace_machine_uuid
+    ON hosts(workspace_id, machine_uuid)
+    WHERE machine_uuid IS NOT NULL AND machine_uuid <> '';
+
 CREATE TABLE IF NOT EXISTS host_skills (
     id BIGSERIAL PRIMARY KEY,
     host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
