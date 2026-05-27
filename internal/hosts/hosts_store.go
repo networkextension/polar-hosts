@@ -45,6 +45,13 @@ type Host struct {
 	AdvertisedSkillsJSON json.RawMessage `json:"advertised_skills,omitempty"`
 	LastSeenAt           *time.Time      `json:"last_seen_at,omitempty"`
 	CreatedAt            time.Time       `json:"created_at"`
+	// HostInfo is the static-fact blob the agent pushes once per
+	// reconnect via /internal/v1/hosts/hello. Schema is agent-owned and
+	// intentionally untyped here so adding fields like "virt" or
+	// "cpu_model" doesn't require a dock cut. Empty object until the
+	// agent has been upgraded to a build that ships the hello payload.
+	HostInfo        map[string]any `json:"host_info,omitempty"`
+	HostInfoSeenAt  *time.Time     `json:"host_info_seen_at,omitempty"`
 }
 
 // AdvertisedSkill mirrors the agent-side skill descriptor the WS
@@ -193,6 +200,42 @@ func (p *Plugin) updateHostAdvertisedSkills(hostID string, skills []AdvertisedSk
 		hostID, string(payload), now, strings.TrimSpace(remoteIP),
 	)
 	return err
+}
+
+// updateHostInfo writes the host_info_json + host_info_seen_at columns
+// for one host (polar-dock#351). Idempotent — re-running with the same
+// payload is a no-op observable side-effect-wise. Returns whether the
+// UPDATE actually matched a row so the caller can surface "unknown
+// host" without making it an error (a legacy / pre-register agent
+// reconnecting MUST NOT 500 the hello).
+//
+// Empty / null payload is allowed and stored as '{}'::jsonb; that keeps
+// the "old agent, no host_info yet" case explicit in the row rather
+// than silent.
+//
+// Implementation note: jsonb param is passed as string(), NOT []byte —
+// lib/pq sends []byte as bytea which cannot cast to jsonb. (Same
+// gotcha bit polar-dock e7d80b9 on plugin_modules.ui_routes.)
+func (p *Plugin) updateHostInfo(hostID string, hostInfoJSON []byte, seenAt time.Time) (bool, error) {
+	if strings.TrimSpace(hostID) == "" {
+		return false, errors.New("host_id is required")
+	}
+	payload := string(hostInfoJSON)
+	if strings.TrimSpace(payload) == "" {
+		payload = "{}"
+	}
+	res, err := p.DB.Exec(
+		`UPDATE hosts
+		 SET host_info_json    = $2::jsonb,
+		     host_info_seen_at = $3
+		 WHERE id = $1`,
+		hostID, payload, seenAt,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // ensureHostSkillFromAdvertise materializes a host_skills row for an
@@ -495,7 +538,9 @@ const hostSelectColumns = `SELECT id, workspace_id, slug, name,
 	    agent_token_id, COALESCE(os, ''), COALESCE(arch, ''),
 	    COALESCE(last_seen_ip, ''),
 	    COALESCE(advertised_skills_json::text, '[]'),
-	    last_seen_at, created_at
+	    last_seen_at, created_at,
+	    COALESCE(host_info_json::text, '{}'),
+	    host_info_seen_at
 	  FROM hosts`
 
 // scanHost handles both QueryRow + Query results via the io.Reader-ish
@@ -521,10 +566,13 @@ func scanHostInto(row rowScanner) (*Host, error) {
 	var agentTokenID sql.NullString
 	var lastSeenAt sql.NullTime
 	var skillsText string
+	var hostInfoText string
+	var hostInfoSeenAt sql.NullTime
 	if err := row.Scan(
 		&h.ID, &h.WorkspaceID, &h.Slug, &h.Name,
 		&agentTokenID, &h.OS, &h.Arch, &h.LastSeenIP,
 		&skillsText, &lastSeenAt, &h.CreatedAt,
+		&hostInfoText, &hostInfoSeenAt,
 	); err != nil {
 		return nil, err
 	}
@@ -537,6 +585,18 @@ func scanHostInto(row rowScanner) (*Host, error) {
 		h.LastSeenAt = &v
 	}
 	h.AdvertisedSkillsJSON = json.RawMessage(skillsText)
+	// host_info_json is always present (DEFAULT '{}'), but decode
+	// defensively — a corrupt row shouldn't 500 the list endpoint.
+	if hostInfoText != "" {
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(hostInfoText), &parsed); err == nil && len(parsed) > 0 {
+			h.HostInfo = parsed
+		}
+	}
+	if hostInfoSeenAt.Valid {
+		v := hostInfoSeenAt.Time
+		h.HostInfoSeenAt = &v
+	}
 	return &h, nil
 }
 
