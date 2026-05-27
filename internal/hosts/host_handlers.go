@@ -89,6 +89,11 @@ func (p *Plugin) handleHostRegister(c *gin.Context) {
 	var req struct {
 		HostOS   string `json:"host_os"`
 		HostArch string `json:"host_arch"`
+		// MachineUUID — stable per-machine fingerprint the agent
+		// collects in hostinfo (IOPlatformUUID / machine-id / smbios).
+		// Optional: legacy agents that predate the field send "" and
+		// we fall back to the pre-PR INSERT-only path. See createHost.
+		MachineUUID string `json:"machine_uuid"`
 	}
 	_ = c.ShouldBindJSON(&req) // body optional; agent advertises arch/os via WS later anyway
 
@@ -107,7 +112,7 @@ func (p *Plugin) handleHostRegister(c *gin.Context) {
 		}
 		return
 	}
-	host, err := p.createHost(workspaceID, hostName, tokenID, req.HostOS, req.HostArch, now)
+	host, err := p.createOrUpdateHostByMachineUUID(workspaceID, hostName, tokenID, req.HostOS, req.HostArch, req.MachineUUID, now)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法创建 host: " + err.Error()})
 		return
