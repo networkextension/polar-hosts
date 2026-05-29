@@ -401,17 +401,22 @@ func (p *Plugin) getHostByAgentToken(agentTokenID string) (*Host, error) {
 		return nil, nil
 	}
 	// v4: token → agents.agent_token_id → agents.host_id → hosts.id.
-	// hostSelectColumns ends with `FROM hosts` (unaliased), so we
-	// append the JOIN + WHERE in the same shape every other call
-	// site uses. The correlated subquery inside hostSelectColumns
-	// uses a lexically-scoped alias `a` that doesn't collide with
-	// our outer JOIN alias `ag`.
+	// We use a scalar subquery in WHERE rather than a JOIN: hosts and
+	// agents share column names (id, workspace_id, name, agent_token_id,
+	// os, arch, created_at), so a JOIN against the unqualified
+	// hostSelectColumns SELECT list throws "column reference is
+	// ambiguous". The subquery keeps the outer SELECT a plain
+	// `FROM hosts` and reuses hostSelectColumns verbatim (including its
+	// own agents_count correlated subquery, which is independently
+	// scoped to `FROM agents a`).
 	host, err := p.scanHost(p.DB.QueryRow(
 		hostSelectColumns+`
-		  JOIN agents ag ON ag.host_id = hosts.id
-		 WHERE ag.agent_token_id = $1
-		 ORDER BY ag.created_at DESC
-		 LIMIT 1`, agentTokenID))
+		 WHERE id = (
+		   SELECT host_id FROM agents
+		    WHERE agent_token_id = $1
+		    ORDER BY created_at DESC
+		    LIMIT 1
+		 )`, agentTokenID))
 	if err == nil && host != nil {
 		return host, nil
 	}
