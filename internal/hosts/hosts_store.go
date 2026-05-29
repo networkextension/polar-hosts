@@ -387,12 +387,35 @@ func (p *Plugin) getHostBySlug(workspaceID, slug string) (*Host, error) {
 }
 
 // getHostByAgentToken is on the hot path of every agent WS message
-// (called once at attach to cache host_id on agentConn). Backed by the
-// partial index idx_hosts_agent_token in the schema.
+// (called once at attach to cache host_id on agentConn). It tries the
+// v4 chain first (agent_tokens → agents.agent_token_id → agents.host_id
+// → hosts.id) and falls back to the v3 chain (hosts.agent_token_id)
+// for legacy rows that haven't been migrated to v4 yet.
+//
+// v4-first ordering matters: hosts.agent_token_id is NULL for every
+// v4-registered host (see doc/arch/agent-identity-v4.md), so a v3-only
+// query silently drops every v4 agent's skill.advertise frames. The v3
+// fallback covers the small number of pre-v4 hosts still in prod.
 func (p *Plugin) getHostByAgentToken(agentTokenID string) (*Host, error) {
 	if strings.TrimSpace(agentTokenID) == "" {
 		return nil, nil
 	}
+	// v4: token → agents.agent_token_id → agents.host_id → hosts.id.
+	// hostSelectColumns ends with `FROM hosts` (unaliased), so we
+	// append the JOIN + WHERE in the same shape every other call
+	// site uses. The correlated subquery inside hostSelectColumns
+	// uses a lexically-scoped alias `a` that doesn't collide with
+	// our outer JOIN alias `ag`.
+	host, err := p.scanHost(p.DB.QueryRow(
+		hostSelectColumns+`
+		  JOIN agents ag ON ag.host_id = hosts.id
+		 WHERE ag.agent_token_id = $1
+		 ORDER BY ag.created_at DESC
+		 LIMIT 1`, agentTokenID))
+	if err == nil && host != nil {
+		return host, nil
+	}
+	// v3 fallback: token → hosts.agent_token_id
 	return p.scanHost(p.DB.QueryRow(hostSelectColumns+` WHERE agent_token_id = $1 LIMIT 1`, agentTokenID))
 }
 
