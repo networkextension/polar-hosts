@@ -314,13 +314,20 @@ func (p *Plugin) mirrorDockAgentTokenForAgent(hostID, agentName, workspaceID, ra
 		// stable-but-unused stub so the FK isn't NULL.
 		hash = "v4-stub-" + id
 	}
-	// Resolve the owner_user_id from the workspace's owner so
-	// agent_tokens.user_id is populated.
+	// agent_tokens.user_id needs SOMETHING; polar_hosts has no users
+	// table (that's a dock-side concern). Borrow an existing
+	// agent_tokens.user_id — guaranteed valid by FK semantics on the
+	// dock side. For the very-first register (no rows yet) fall back
+	// to "system".
 	var ownerUserID string
 	if err := p.DB.QueryRow(
-		`SELECT u.id FROM users u WHERE u.role = 'admin' ORDER BY u.created_at LIMIT 1`,
+		`SELECT user_id FROM agent_tokens WHERE user_id IS NOT NULL AND user_id <> '' ORDER BY created_at LIMIT 1`,
 	).Scan(&ownerUserID); err != nil {
-		return "", fmt.Errorf("resolve owner: %w", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			ownerUserID = "system"
+		} else {
+			return "", fmt.Errorf("resolve owner: %w", err)
+		}
 	}
 	if _, err := p.DB.Exec(
 		`INSERT INTO agent_tokens (id, user_id, name, token_hash, coder_config, created_at)
@@ -847,14 +854,29 @@ func (p *Plugin) createEnrollmentToken(userID, workspaceID, hostName string, now
 	return tokenID, raw, expiresAt, nil
 }
 
-// consumeEnrollmentToken validates a pending token, returns the
-// (workspace_id, host_name) the admin chose at mint time, clears the
-// pending marker, and returns the (tokenID, userID) so the caller can
-// proceed to createHost. Errors map cleanly to HTTP statuses:
-//   - sql.ErrNoRows           → 401 (bad token)
-//   - errEnrollmentExpired    → 410 (timed out, 1h TTL)
-//   - errEnrollmentAlready    → 409 (already consumed)
+// consumeEnrollmentToken — DEPRECATED. The eager UPDATE inside this
+// function burned tokens on partial-register failures (downstream
+// errors in createHost/mirror left the token consumed but no host
+// created). Use validateEnrollmentToken + markEnrollmentConsumed
+// instead: validate up front, mark consumed ONLY after the full
+// register pipeline succeeds. Kept as a thin shim for callers we
+// haven't audited yet.
 func (p *Plugin) consumeEnrollmentToken(rawToken string, now time.Time) (tokenID, userID, workspaceID, hostName string, err error) {
+	tokenID, userID, workspaceID, hostName, err = p.validateEnrollmentToken(rawToken, now)
+	if err != nil {
+		return
+	}
+	if merr := p.markEnrollmentConsumed(tokenID); merr != nil {
+		err = merr
+	}
+	return
+}
+
+// validateEnrollmentToken — read-only check. Returns the row's ids +
+// the admin's chosen workspace/hostName from the pending marker.
+// Does NOT mutate the row. Caller MUST call markEnrollmentConsumed
+// once the rest of the register pipeline has succeeded.
+func (p *Plugin) validateEnrollmentToken(rawToken string, now time.Time) (tokenID, userID, workspaceID, hostName string, err error) {
 	rawToken = strings.TrimSpace(rawToken)
 	if rawToken == "" {
 		err = sql.ErrNoRows
@@ -880,17 +902,21 @@ func (p *Plugin) consumeEnrollmentToken(rawToken string, now time.Time) (tokenID
 		err = errEnrollmentExpired
 		return
 	}
-	// Clear the pending marker so subsequent uses get errEnrollmentAlready.
-	if _, uerr := p.DB.Exec(
-		`UPDATE agent_tokens SET coder_config = '{}'::jsonb WHERE id = $1`,
-		tokenID,
-	); uerr != nil {
-		err = uerr
-		return
-	}
 	workspaceID = marker.WorkspaceID
 	hostName = marker.HostName
 	return
+}
+
+// markEnrollmentConsumed clears the pending marker. Called by the
+// register handler ONLY after the full pipeline (createHost + dock
+// mirror + agents insert) has succeeded — so a partial failure
+// leaves the token reusable.
+func (p *Plugin) markEnrollmentConsumed(tokenID string) error {
+	_, err := p.DB.Exec(
+		`UPDATE agent_tokens SET coder_config = '{}'::jsonb WHERE id = $1`,
+		tokenID,
+	)
+	return err
 }
 
 var (
