@@ -215,8 +215,8 @@ func TestRegisterAgent_NewHost(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	// mirrorDockAgentTokenForAgent — resolve admin user, then INSERT token row.
-	mock.ExpectQuery(`SELECT u.id FROM users u WHERE u.role = 'admin'`).
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("u_admin"))
+	mock.ExpectQuery(`SELECT user_id FROM agent_tokens WHERE user_id IS NOT NULL`).
+		WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow("u_admin"))
 	mock.ExpectExec(`INSERT INTO agent_tokens`).
 		WithArgs(sqlmock.AnyArg(), "u_admin", "agent:"+agentName, sqlmock.AnyArg(), now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -302,8 +302,8 @@ func TestRegisterAgent_DropsRawUUID(t *testing.T) {
 	mock.ExpectExec(`INSERT INTO hosts`).
 		WithArgs(hostID, workspaceID, agentName, agentName, "", "", now).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery(`SELECT u.id FROM users u WHERE u.role = 'admin'`).
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("u_admin"))
+	mock.ExpectQuery(`SELECT user_id FROM agent_tokens WHERE user_id IS NOT NULL`).
+		WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow("u_admin"))
 	mock.ExpectExec(`INSERT INTO agent_tokens`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`SELECT id FROM agent_tokens WHERE token_hash = \$1`).

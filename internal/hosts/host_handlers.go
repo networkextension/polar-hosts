@@ -19,6 +19,7 @@ package hosts
 import (
 	"database/sql"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -108,7 +109,7 @@ func (p *Plugin) handleHostRegister(c *gin.Context) {
 	}
 
 	now := time.Now().UTC()
-	_, _, workspaceID, hostName, err := p.consumeEnrollmentToken(bearer, now)
+	tokenID, _, workspaceID, hostName, err := p.validateEnrollmentToken(bearer, now)
 	if err != nil {
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
@@ -132,8 +133,19 @@ func (p *Plugin) handleHostRegister(c *gin.Context) {
 		HostInfo:       req.HostInfo,
 	}, now)
 	if err != nil {
+		// Pipeline failed; leave the enroll token reusable (no UPDATE
+		// happened in validateEnrollmentToken).
+		log.Printf("register: pipeline failed for token=%s name=%s: %v", tokenID, hostName, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "register: " + err.Error()})
 		return
+	}
+	// Pipeline succeeded — now (and only now) burn the token so it
+	// can't be re-used to mint a second host.
+	if mErr := p.markEnrollmentConsumed(tokenID); mErr != nil {
+		log.Printf("register: WARNING token=%s consumed but markConsumed failed: %v", tokenID, mErr)
+		// Don't fail the response — the agent has its credentials,
+		// the host exists. The token will get GC'd or remain reusable
+		// (worst case: operator sees a stale "pending" entry in /hosts.html).
 	}
 	c.JSON(http.StatusCreated, gin.H{
 		"agent_id":        result.AgentID,
@@ -151,6 +163,7 @@ func (p *Plugin) handleHostList(c *gin.Context) {
 	}
 	hosts, err := p.listHostsForWorkspace(workspaceID)
 	if err != nil {
+		log.Printf("handleHostList workspace=%s: %v", workspaceID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "服务器错误"})
 		return
 	}
