@@ -31,9 +31,11 @@ check() {
   local ok=0
   IFS=',' read -ra codes <<<"$want"
   for c in "${codes[@]}"; do [ "$code" = "$c" ] && ok=1; done
-  # Any 5xx is always a failure regardless of `want`.
+  # Any 5xx is always a failure regardless of `want`. The whole point of
+  # this gate is to catch 500s and route-missing 404s.
   if [[ "$code" =~ ^5 ]]; then ok=0; fi
-  if [ "$ok" = 1 ] && [ -n "$key" ]; then
+  # Envelope check only applies to a 200 (a 403 access-gate body has no data).
+  if [ "$ok" = 1 ] && [ "$code" = 200 ] && [ -n "$key" ]; then
     echo "$body" | grep -q "\"$key\"" || { ok=0; code="$code(missing .$key)"; }
   fi
   if [ "$ok" = 1 ]; then
@@ -45,12 +47,14 @@ check() {
 
 echo "== host/agent smoke @ ${BASE} ${WS:+(ws=$WS)} =="
 check GET /healthz                              200
-# Lists MUST be 200 with the right envelope (the 500/empty regressions live here)
-check GET /api/hosts                            200 hosts
-check GET /api/agents                           200 agents
-check GET /api/host-skills                      200
-check GET /api/console/layouts                  200
-check GET /api/skill-catalog                    200
+# Lists: 200 (granted workspace, envelope checked) or 403 (closed-by-default
+# access gate) — but NEVER 5xx or a route-missing 404. The 500/empty
+# regressions we shipped before would surface here.
+check GET /api/hosts                            200,403 hosts
+check GET /api/agents                           200,403 agents
+check GET /api/host-skills                      200,403
+check GET /api/console/layouts                  200,403
+check GET /api/skill-catalog                    200,403
 # Detail with a bogus id must be a CLEAN 404 (JSON), never a 500
 check GET /api/agents/ag_smoke_does_not_exist   404,403 error
 check GET /api/hosts/host_smoke_missing         404,403 error
