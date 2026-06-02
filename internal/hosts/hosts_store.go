@@ -186,11 +186,14 @@ type RegisterAgentInput struct {
 // agent CLI — the raw token is shown once (agent persists in
 // agent.toml + we keep only the hash).
 type RegisterAgentResult struct {
-	AgentID   string
-	HostID    string
-	BotUserID string
-	TokenRaw  string
-	Server    string
+	AgentID      string
+	HostID       string
+	BotUserID    string
+	TokenRaw     string
+	Server       string
+	ProxyToken   string
+	ProxyBaseURL string
+	DefaultModel string
 }
 
 // registerAgent is the v4 register entry — see
@@ -279,11 +282,14 @@ func (p *Plugin) registerAgent(in RegisterAgentInput, now time.Time) (*RegisterA
 	}
 
 	return &RegisterAgentResult{
-		AgentID:   resp.AgentID,
-		HostID:    resp.HostID,
-		BotUserID: resp.BotUserID,
-		TokenRaw:  resp.AgentTokenRaw,
-		Server:    resp.Server,
+		AgentID:      resp.AgentID,
+		HostID:       resp.HostID,
+		BotUserID:    resp.BotUserID,
+		TokenRaw:     resp.AgentTokenRaw,
+		Server:       resp.Server,
+		ProxyToken:   resp.ProxyToken,
+		ProxyBaseURL: resp.ProxyBaseURL,
+		DefaultModel: resp.DefaultModel,
 	}, nil
 }
 
