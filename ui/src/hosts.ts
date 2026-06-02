@@ -26,6 +26,7 @@ import {
 } from "./api/hosts.js";
 import { byId } from "@networkextension/polar-ui-common/lib/dom";
 import { hydrateSiteBrand, renderSidebarFoot } from "@networkextension/polar-ui-common/lib/site";
+import { mountPlatformNav } from "@networkextension/polar-ui-common/lib/sidebar";
 import { bindThemeSync, initStoredTheme } from "@networkextension/polar-ui-common/lib/theme";
 import type { Host, HostSkill, HostSkillCredential } from "./types/hosts.js";
 
@@ -550,6 +551,7 @@ async function boot(): Promise<void> {
   }
   renderSidebarFoot(data);
   hydrateSiteBrand();
+  void mountPlatformNav();
   await loadHosts();
 }
 
