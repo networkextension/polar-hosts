@@ -153,6 +153,9 @@ func (p *Plugin) handleHostRegister(c *gin.Context) {
 		"bot_user_id":     result.BotUserID,
 		"agent_token_raw": result.TokenRaw,
 		"server":          result.Server,
+		"proxy_token":     result.ProxyToken,
+		"proxy_base_url":  result.ProxyBaseURL,
+		"default_model":   result.DefaultModel,
 	})
 }
 
