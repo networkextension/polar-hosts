@@ -18,6 +18,7 @@ import {
   deleteHostSkillCredential,
   enrollHost,
   fetchHost,
+  fetchHostAgents,
   fetchHostSkillCredentials,
   fetchHostSkillsForHost,
   fetchHosts,
@@ -28,7 +29,7 @@ import { byId } from "@networkextension/polar-ui-common/lib/dom";
 import { hydrateSiteBrand, renderSidebarFoot } from "@networkextension/polar-ui-common/lib/site";
 import { mountPlatformNav } from "@networkextension/polar-ui-common/lib/sidebar";
 import { bindThemeSync, initStoredTheme } from "@networkextension/polar-ui-common/lib/theme";
-import type { Host, HostSkill, HostSkillCredential } from "./types/hosts.js";
+import type { AgentListItem, Host, HostInfo, HostSkill, HostSkillCredential } from "./types/hosts.js";
 
 initStoredTheme();
 bindThemeSync();
@@ -44,6 +45,8 @@ const hostsSlug = byId<HTMLElement>("hostsSlug");
 const hostsSkillsList = byId<HTMLElement>("hostsSkillsList");
 const hostsLastSeen = byId<HTMLElement>("hostsLastSeen");
 const hostsLastSeenIP = byId<HTMLElement>("hostsLastSeenIP");
+const hostsHardwareGrid = byId<HTMLElement>("hostsHardwareGrid");
+const hostsAgentsList = byId<HTMLElement>("hostsAgentsList");
 const hostsDeleteBtn = byId<HTMLButtonElement>("hostsDeleteBtn");
 
 const hostsAddBtn = byId<HTMLButtonElement>("hostsAddBtn");
@@ -91,6 +94,20 @@ function formatRelative(iso?: string): string {
   return `${Math.floor(diff / 86_400_000)} 天前`;
 }
 
+// Human-readable bytes → "32 GB" / "494 GB" / "1.2 TB". Base-1000
+// (marketing GB, matches how Apple labels disk/RAM). 0/undefined → "—".
+function formatBytes(n?: number): string {
+  if (!n || n <= 0) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1000 && i < units.length - 1) {
+    v /= 1000;
+    i++;
+  }
+  return `${v >= 100 || i <= 1 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
 // Online threshold: agent advertises every WS handshake + a future
 // heartbeat will keep last_seen_at fresh. 60s gives generous slack
 // for cellular / wifi roaming without false-yellow flicker.
@@ -135,6 +152,16 @@ function renderHostsList(): void {
         .map((s) => `<span class="settings-value-pill" style="font-size:10px;">${escapeHTML(s.kind)}</span>`)
         .join(" ");
       const active = h.id === activeHostId ? "active" : "";
+      // Basic info line: friendly model (if reported) + os/arch, then status.
+      const model = h.host_info?.model_name || h.host_info?.hw_model || "";
+      const agentCount = h.agents_count || 0;
+      const basics = [
+        model ? escapeHTML(model) : "",
+        `${escapeHTML(h.os || "?")}/${escapeHTML(h.arch || "?")}`,
+        agentCount ? `${agentCount} agent${agentCount > 1 ? "s" : ""}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
       return `
         <div class="video-studio-project-item ${active}" data-host-id="${escapeHTML(h.id)}">
           <div style="flex:1; min-width:0;">
@@ -142,7 +169,10 @@ function renderHostsList(): void {
               ${dot} ${escapeHTML(h.name)}
             </div>
             <div style="font-size:11px; color:var(--text-muted,#888); margin-top:2px;">
-              ${escapeHTML(h.os || "?")}/${escapeHTML(h.arch || "?")} · ${escapeHTML(status)}
+              ${basics}
+            </div>
+            <div style="font-size:11px; color:var(--text-muted,#888); margin-top:1px;">
+              ${escapeHTML(status)}
             </div>
             <div style="margin-top:4px; display:flex; gap:4px; flex-wrap:wrap;">
               ${skillBadges}
@@ -183,9 +213,100 @@ function renderHostDetail(host: Host): void {
   hostsLastSeen.textContent = host.last_seen_at ? formatRelative(host.last_seen_at) + " （" + new Date(host.last_seen_at).toLocaleString() + "）" : "—";
   hostsLastSeenIP.textContent = host.last_seen_ip ? `IP: ${host.last_seen_ip}` : "IP: —";
 
+  // 硬件信息 — render the static host_info facts (model/cpu/mem/disk/wifi
+  // + battery/fan chips). Falls back gracefully when a field is missing.
+  renderHostHardware(host.host_info);
+
+  // 配 Agent — the logical agents bound to this host. Loads async.
+  hostsAgentsList.innerHTML = `<div class="chat-empty">加载 agents...</div>`;
+  void loadHostAgents(host.id);
+
   renderHostMetricsSection(host);
 
   hostsDeleteBtn.hidden = false;
+}
+
+// ── 硬件信息 ─────────────────────────────────────────────────────────────
+// Renders the agent-collected host_info as a label/value grid. Each cell
+// is omitted when its source field is absent (collector failed / older
+// agent), so the grid only shows what we actually know.
+function renderHostHardware(info?: HostInfo): void {
+  if (!info) {
+    hostsHardwareGrid.innerHTML = `<div class="chat-empty" style="grid-column:1/-1;">尚未上报硬件信息。等 polar-agent 重新 attach 一次就会自动登记。</div>`;
+    return;
+  }
+  const cells: Array<[string, string]> = [];
+  const push = (label: string, val?: string) => {
+    if (val && val !== "—") cells.push([label, val]);
+  };
+  push("型号", info.model_name || info.hw_model);
+  push("CPU", info.cpu_brand ? `${info.cpu_brand}${info.cpu_cores ? ` · ${info.cpu_cores} 核` : ""}` : info.cpu_cores ? `${info.cpu_cores} 核` : undefined);
+  push("内存", formatBytes(info.memory_bytes));
+  push("磁盘", formatBytes(info.disk_total_bytes));
+  if (info.gpu?.model) push("GPU", `${info.gpu.model}${info.gpu.cores ? ` · ${info.gpu.cores} 核` : ""}`);
+  push("系统", info.os_version);
+  push("Wi-Fi MAC", info.wifi_mac);
+  if (info.virt) push("虚拟化", info.virt);
+
+  // battery / fan presence chips (tri-state: undefined = unknown → omit).
+  const chips: string[] = [];
+  if (info.has_battery !== undefined) {
+    chips.push(`<span class="settings-value-pill" style="font-size:11px;">${info.has_battery ? "🔋 有电池" : "🔌 无电池"}</span>`);
+  }
+  if (info.has_fan !== undefined) {
+    chips.push(`<span class="settings-value-pill" style="font-size:11px;">${info.has_fan ? "🌀 有风扇" : "🪨 无风扇"}</span>`);
+  }
+
+  if (!cells.length && !chips.length) {
+    hostsHardwareGrid.innerHTML = `<div class="chat-empty" style="grid-column:1/-1;">硬件信息为空。</div>`;
+    return;
+  }
+
+  const grid = cells
+    .map(
+      ([label, val]) => `
+      <div style="display:flex; flex-direction:column; gap:2px;">
+        <span style="font-size:11px; color:var(--text-muted,#888);">${escapeHTML(label)}</span>
+        <span style="font-size:13px; font-family:${label === "Wi-Fi MAC" ? "monospace" : "inherit"};">${escapeHTML(val)}</span>
+      </div>`,
+    )
+    .join("");
+  const chipRow = chips.length
+    ? `<div style="grid-column:1/-1; display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;">${chips.join(" ")}</div>`
+    : "";
+  hostsHardwareGrid.innerHTML = grid + chipRow;
+}
+
+// ── 配 Agent ─────────────────────────────────────────────────────────────
+async function loadHostAgents(hostID: string): Promise<void> {
+  const { response, data } = await fetchHostAgents(hostID);
+  if (!response.ok) {
+    hostsAgentsList.innerHTML = `<div class="chat-empty">加载 agents 失败：${escapeHTML(data.error || response.statusText)}</div>`;
+    return;
+  }
+  renderAgents(data.agents || []);
+}
+
+function renderAgents(agents: AgentListItem[]): void {
+  if (!agents.length) {
+    hostsAgentsList.innerHTML = `<div class="chat-empty">这台主机还没有 agent。用上面的注册凭证在机器上跑 <code>polar-agent register</code> 即可绑定。</div>`;
+    return;
+  }
+  hostsAgentsList.innerHTML = agents
+    .map((a) => {
+      const hello = a.last_hello_at ? `最后 hello ${formatRelative(a.last_hello_at)}` : "从未 hello";
+      const bot = a.bot_user_id ? `bot ${escapeHTML(a.bot_user_id)}` : "";
+      const meta = [a.os && a.arch ? `${escapeHTML(a.os)}/${escapeHTML(a.arch)}` : "", bot, hello]
+        .filter(Boolean)
+        .join(" · ");
+      return `
+        <div style="display:flex; flex-direction:column; gap:2px; padding:8px 10px; border:1px solid var(--border,#333); border-radius:8px;">
+          <div style="font-weight:500; font-size:13px;">${escapeHTML(a.name)}</div>
+          <div style="font-size:11px; color:var(--text-muted,#888);">${meta}</div>
+          <div style="font-size:10px; color:var(--text-muted,#888); font-family:monospace;">${escapeHTML(a.id)} · token …${escapeHTML(a.agent_token_id_suffix)}</div>
+        </div>`;
+    })
+    .join("");
 }
 
 // macmon dashboard embed — only meaningful for darwin (macmon is

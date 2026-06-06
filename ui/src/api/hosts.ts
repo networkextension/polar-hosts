@@ -2,6 +2,7 @@
 
 import { requestJson } from "@networkextension/polar-ui-common/api/http";
 import type {
+  AgentListResponse,
   Host,
   HostDetailResponse,
   HostEnrollPayload,
@@ -21,6 +22,11 @@ export async function fetchHosts() {
 
 export async function fetchHost(id: string) {
   return requestJson<HostDetailResponse>(`/api/hosts/${encodeURIComponent(id)}`);
+}
+
+// Agents bound to one host (v4). Used by the detail "配 Agent" section.
+export async function fetchHostAgents(id: string) {
+  return requestJson<AgentListResponse>(`/api/hosts/${encodeURIComponent(id)}/agents`);
 }
 
 export async function enrollHost(payload: HostEnrollPayload) {
