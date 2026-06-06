@@ -11,6 +11,26 @@ export type AdvertisedSkill = {
   capabilities?: Record<string, unknown>;
 };
 
+// HostInfo — static facts the agent collects at register/hello (opaque
+// JSONB server-side). Mirrors hostinfo.HostInfo in polar-agent. All
+// optional: a collector that failed simply omits its key.
+export type HostInfo = {
+  hw_model?: string;
+  model_name?: string; // friendly ("MacBook Pro") — darwin
+  cpu_brand?: string;
+  cpu_cores?: number;
+  memory_bytes?: number;
+  gpu?: { vendor?: string; model?: string; cores?: number };
+  os_version?: string;
+  kernel?: string;
+  virt?: string;
+  // Tier-1/2 static facts (polar-agent P0)
+  wifi_mac?: string;
+  disk_total_bytes?: number;
+  has_battery?: boolean;
+  has_fan?: boolean;
+};
+
 export type Host = {
   id: string;
   workspace_id: string;
@@ -23,6 +43,30 @@ export type Host = {
   advertised_skills?: AdvertisedSkill[];
   last_seen_at?: string;
   created_at: string;
+  // v4 + host-info additions (optional — older rows / dock versions omit)
+  host_info?: HostInfo;
+  agents_count?: number;
+  mem_peak_bytes?: number;
+  cpu_peak_pct?: number;
+};
+
+// AgentListItem — one logical agent bound to a host (v4). From
+// GET /api/hosts/:id/agents. Mirrors AgentListItem in hosts_store.go.
+export type AgentListItem = {
+  id: string;
+  host_id: string;
+  host_name?: string;
+  name: string;
+  bot_user_id?: string;
+  agent_token_id_suffix: string;
+  os?: string;
+  arch?: string;
+  created_at: string;
+  last_hello_at?: string;
+};
+
+export type AgentListResponse = ErrorResponse & {
+  agents?: AgentListItem[];
 };
 
 export type HostListResponse = ErrorResponse & {
