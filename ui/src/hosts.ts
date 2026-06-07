@@ -40,7 +40,16 @@ const hostsName = byId<HTMLElement>("hostsName");
 const hostsStatusBadge = byId<HTMLElement>("hostsStatusBadge");
 const hostsOSArch = byId<HTMLElement>("hostsOSArch");
 const hostsSlug = byId<HTMLElement>("hostsSlug");
+const hostsWgLink = byId<HTMLAnchorElement>("hostsWgLink");
 const hostsSkillsList = byId<HTMLElement>("hostsSkillsList");
+
+// Cross-link to the polar-wg module (Devices, filtered to this host). Derives
+// wg.<env> from the current origin (hosts.<env>), matching the platform-nav
+// absolute-URL convention.
+function wgLinkURL(hostId: string): string {
+  const host = window.location.host.replace(/^hosts\./, "wg.");
+  return `${window.location.protocol}//${host}/wg-tokens.html?host_id=${encodeURIComponent(hostId)}`;
+}
 const hostsLastSeen = byId<HTMLElement>("hostsLastSeen");
 const hostsLastSeenIP = byId<HTMLElement>("hostsLastSeenIP");
 const hostsDeleteBtn = byId<HTMLButtonElement>("hostsDeleteBtn");
@@ -172,6 +181,8 @@ function renderHostDetail(host: Host): void {
   hostsStatusBadge.style.background = online ? "rgba(34,197,94,.12)" : "rgba(148,163,184,.12)";
   hostsOSArch.textContent = `${host.os || "?"}/${host.arch || "?"}`;
   hostsSlug.textContent = host.slug;
+  hostsWgLink.href = wgLinkURL(host.id);
+  hostsWgLink.hidden = false;
 
   // P1d: render persistent host_skills (auto-shimmed from advertise)
   // with inline credential forms. Loads async; show a placeholder
@@ -551,6 +562,12 @@ async function boot(): Promise<void> {
   renderSidebarFoot(data);
   hydrateSiteBrand();
   await loadHosts();
+  // Deep-link from another module (e.g. polar-wg device row): ?id=<host_id>
+  // auto-opens that host's detail.
+  const deepID = new URLSearchParams(window.location.search).get("id");
+  if (deepID && hosts.some((h) => h.id === deepID)) {
+    void openHost(deepID);
+  }
 }
 
 logoutBtn?.addEventListener("click", () => {
