@@ -144,6 +144,51 @@ function setStatus(el: HTMLElement | null, msg: string, error = false): void {
   el.classList.toggle("status-success", !error);
 }
 
+// ── device icons (Lucide, ISC-licensed, inlined — no runtime dep) ─────────
+// Keyed by os/model/virt so a host reads at a glance: laptop vs server vs
+// VM vs phone, tinted by platform.
+const LUCIDE: Record<string, string> = {
+  laptop:
+    '<path d="M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z"/><path d="M20.054 15.987H3.946"/>',
+  monitor:
+    '<rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/>',
+  server:
+    '<rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>',
+  smartphone: '<rect width="14" height="20" x="5" y="2" rx="2" ry="2"/><path d="M12 18h.01"/>',
+  box:
+    '<path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',
+  hardDrive:
+    '<path d="M10 16h.01"/><path d="M2.212 11.577a2 2 0 0 0-.212.896V18a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.527a2 2 0 0 0-.212-.896L18.55 5.11A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><path d="M21.946 12.013H2.054"/><path d="M6 16h.01"/>',
+};
+
+function deviceKind(h: Host): { key: string; color: string } {
+  const os = (h.os || "").toLowerCase();
+  const model = (h.host_info?.model_name || h.host_info?.hw_model || "").toLowerCase();
+  const virt = (h.host_info?.virt || "").toLowerCase();
+  const battery = h.host_info?.has_battery;
+  if (os === "ios" || os === "android") return { key: "smartphone", color: "#0a84ff" };
+  if (virt && virt !== "none") return { key: "box", color: "#a855f7" }; // VM / hypervisor guest
+  if (os === "darwin" || os === "macos") {
+    if (/(mini|studio|imac|mac ?pro|macpro)/.test(model)) return { key: "monitor", color: "#8e8e93" };
+    if (battery === true || /macbook|laptop/.test(model)) return { key: "laptop", color: "#8e8e93" };
+    return { key: "laptop", color: "#8e8e93" };
+  }
+  if (os === "linux") return { key: "server", color: "#dd7a18" };
+  if (os === "freebsd") return { key: "server", color: "#c0392b" };
+  if (os === "windows") return { key: "monitor", color: "#0a84ff" };
+  return { key: "hardDrive", color: "#8e8e93" };
+}
+
+function deviceIconSVG(h: Host, size = 22): string {
+  const { key, color } = deviceKind(h);
+  return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${LUCIDE[key] || LUCIDE.hardDrive}</svg>`;
+}
+
+// A rounded badge wrapping the device icon; ringed green when the host is online.
+function deviceBadge(h: Host, online: boolean): string {
+  return `<div style="flex:0 0 auto; width:36px; height:36px; display:flex; align-items:center; justify-content:center; border-radius:9px; background:var(--surface-2,#f2f2f7); box-shadow:${online ? "0 0 0 2px #34c759 inset" : "none"};">${deviceIconSVG(h)}</div>`;
+}
+
 // ── list rendering ──────────────────────────────────────────────────────
 function renderHostsList(): void {
   if (!hosts.length) {
@@ -172,7 +217,8 @@ function renderHostsList(): void {
         .filter(Boolean)
         .join(" · ");
       return `
-        <div class="video-studio-project-item ${active}" data-host-id="${escapeHTML(h.id)}">
+        <div class="video-studio-project-item ${active}" data-host-id="${escapeHTML(h.id)}" style="display:flex; gap:10px; align-items:flex-start;">
+          ${deviceBadge(h, online)}
           <div style="flex:1; min-width:0;">
             <div style="font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
               ${dot} ${escapeHTML(h.name)}
@@ -206,8 +252,8 @@ function renderHostDetail(host: Host): void {
   hostsPanel.hidden = false;
   activeHost = host;
 
-  hostsName.textContent = host.name;
   const online = isOnline(host);
+  hostsName.innerHTML = `<span style="display:inline-flex; align-items:center; gap:8px;">${deviceIconSVG(host, 20)}${escapeHTML(host.name)}</span>`;
   hostsStatusBadge.textContent = online ? "🟢 online" : "⚪ offline";
   hostsStatusBadge.style.background = online ? "rgba(34,197,94,.12)" : "rgba(148,163,184,.12)";
   hostsOSArch.textContent = `${host.os || "?"}/${host.arch || "?"}`;
