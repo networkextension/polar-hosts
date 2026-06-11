@@ -217,6 +217,12 @@ func (p *Plugin) RegisterRoutes(r gin.IRouter) {
 	// nginx still routes /ws/agent → dock until Phase 4b cutover.
 	r.GET("/ws/agent", p.handleAgentWS)
 
+	// Phase 4c: browser ↔ agent shell/VNC byte bridges. Auth is via the
+	// same requireAuthViaDock middleware used by the /api/* routes — it
+	// runs before the WS upgrade so standard Bearer + workspace headers work.
+	r.GET("/ws/host/:id/shell/:run_id", p.requireAuthViaDock(), p.handleHostShellWS)
+	r.GET("/ws/host/:id/vnc/:run_id", p.requireAuthViaDock(), p.handleHostVNCWS)
+
 	// Dock-to-plugin internal API. Loopback-only auth — dock dials
 	// the plugin svc directly on 127.0.0.1 and posts skill.advertise
 	// touches here when the WS agent_hub sees an advertise frame.
