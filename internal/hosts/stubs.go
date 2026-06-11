@@ -12,7 +12,6 @@ package hosts
 import (
 	"errors"
 	"log"
-	"sync"
 	"time"
 )
 
@@ -66,114 +65,5 @@ func (p *Plugin) createAgentToken(userID, name string, coders AgentCoderConfig) 
 	return "", nil, errors.New("hosts: createAgentToken not wired (agent_tokens lives in dock; needs SDK surface)")
 }
 
-// ---- agentConn / agentHub / skillEventFrame ---------------------------
-//
-// The WS dispatch path lives in dock's agent_hub.go — polar-agent
-// attaches to dock via /api/agent/attach, and dock holds the live
-// connection. Shell/VNC supervisors here originally walked that
-// in-process connection. After extraction, the connection is on the
-// other side of an HTTP boundary; the proper fix is a WS proxy or
-// SDK SkillDispatch endpoint.
-//
-// For the build-green PR we stub agentConn as an opaque struct with
-// the fields the supervisor reads (close chan) and stub the hub to
-// log + return nil/ErrNotWired. The supervisor still runs; it just
-// short-circuits with a 503-equivalent log line.
-//
-// TODO(extract): wire `/api/agent/skill-dispatch` via SDK or proxy
-// the WS frames through dock. See polar-hosts WIP-NOTES.md.
-
-type skillEventFrame struct {
-	Kind      string         `json:"kind"`
-	RunID     int64          `json:"run_id"`
-	EventKind string         `json:"event_kind"`
-	Data      map[string]any `json:"data,omitempty"`
-}
-
-// skillStartEnvelope mirrors dock's agent_hub.go: the dispatch payload
-// the agent unmarshals to launch a skill.
-type skillStartEnvelope struct {
-	Kind      string         `json:"kind"`
-	RunID     int64          `json:"run_id"`
-	SkillKind string         `json:"skill_kind"`
-	Config    map[string]any `json:"config"`
-}
-
-type agentConn struct {
-	tokenID   string
-	userID    string
-	botUserID string
-	hostID    string
-	close     chan struct{}
-
-	skillPendingMu sync.Mutex
-	skillPending   map[int64]chan skillEventFrame
-
-	skillStdoutMu sync.Mutex
-	skillStdout   map[int64]chan []byte
-}
-
-func (c *agentConn) trackSkillPending(runID int64) chan skillEventFrame {
-	c.skillPendingMu.Lock()
-	defer c.skillPendingMu.Unlock()
-	if c.skillPending == nil {
-		c.skillPending = map[int64]chan skillEventFrame{}
-	}
-	ch := make(chan skillEventFrame, 16)
-	c.skillPending[runID] = ch
-	return ch
-}
-
-func (c *agentConn) untrackSkillPending(runID int64) {
-	c.skillPendingMu.Lock()
-	defer c.skillPendingMu.Unlock()
-	delete(c.skillPending, runID)
-}
-
-func (c *agentConn) trackSkillStdout(runID int64) chan []byte {
-	c.skillStdoutMu.Lock()
-	defer c.skillStdoutMu.Unlock()
-	if c.skillStdout == nil {
-		c.skillStdout = map[int64]chan []byte{}
-	}
-	ch := make(chan []byte, 256)
-	c.skillStdout[runID] = ch
-	return ch
-}
-
-func (c *agentConn) untrackSkillStdout(runID int64) {
-	c.skillStdoutMu.Lock()
-	defer c.skillStdoutMu.Unlock()
-	delete(c.skillStdout, runID)
-}
-
-// agentHubStub stands in for dock's agentHub. lookupByHostID returns
-// nil (offline) — the handlers all guard on nil so this keeps them
-// fail-clean rather than dispatching into a nil pointer.
-// dispatchSkillStart/Stop/Stdin/Resize log + return ErrNotWired.
-type agentHubStub struct{}
-
-func (h *agentHubStub) lookupByHostID(hostID string) *agentConn {
-	log.Printf("hosts: TODO(extract) agentHub.lookupByHostID host=%s — WS hub stays in dock; returning nil (treated as offline)", hostID)
-	return nil
-}
-
-func (h *agentHubStub) dispatchSkillStart(conn *agentConn, env skillStartEnvelope) error {
-	log.Printf("hosts: TODO(extract) dispatchSkillStart run=%d kind=%s — WS path not wired", env.RunID, env.SkillKind)
-	return errors.New("hosts: dispatchSkillStart not wired (agent_hub stays in dock; needs SDK SkillDispatch surface)")
-}
-
-func (h *agentHubStub) dispatchSkillStop(conn *agentConn, runID int64, reason string) error {
-	log.Printf("hosts: TODO(extract) dispatchSkillStop run=%d reason=%s — WS path not wired", runID, reason)
-	return errors.New("hosts: dispatchSkillStop not wired")
-}
-
-func (h *agentHubStub) dispatchSkillStdin(conn *agentConn, runID int64, payload []byte) error {
-	log.Printf("hosts: TODO(extract) dispatchSkillStdin run=%d bytes=%d — WS path not wired", runID, len(payload))
-	return errors.New("hosts: dispatchSkillStdin not wired")
-}
-
-func (h *agentHubStub) dispatchSkillResize(conn *agentConn, runID int64, rows, cols uint16) error {
-	log.Printf("hosts: TODO(extract) dispatchSkillResize run=%d rows=%d cols=%d — WS path not wired", runID, rows, cols)
-	return errors.New("hosts: dispatchSkillResize not wired")
-}
+// agentConn / agentHub / skillEventFrame / skillStartEnvelope live in
+// agent_hub.go (Phase 4a). Stub removed.

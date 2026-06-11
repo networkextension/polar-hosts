@@ -68,8 +68,8 @@ type Plugin struct {
 	shellSessions *shellSessionRegistry
 	vncSessions   *vncSessionRegistry
 
-	// agentHub — stubbed; real WS hub lives in dock. See stubs.go.
-	agentHub *agentHubStub
+	// agentHub — Phase 4a: real WS hub. See agent_hub.go.
+	agentHub *agentHub
 
 	metrics   *hostsMetrics
 	startedAt time.Time
@@ -194,7 +194,7 @@ func New(ctx context.Context, cfg Config) (*Plugin, error) {
 		polarDisableVNCSkill:     cfg.PolarDisableVNCSkill,
 		shellSessions:            newShellSessionRegistry(globalShellMax),
 		vncSessions:              newVNCSessionRegistry(globalVNCMax),
-		agentHub:                 &agentHubStub{},
+		agentHub:                 newAgentHub(),
 		metrics:                  newHostsMetrics(),
 		startedAt:                time.Now(),
 	}, nil
@@ -211,6 +211,11 @@ func readJSON(resp *http.Response, out any) error {
 func (p *Plugin) RegisterRoutes(r gin.IRouter) {
 	r.GET("/healthz", p.handleHealthz)
 	r.GET("/metrics", p.handleMetricsExposition)
+
+	// Phase 4a: agent WebSocket endpoint. No auth middleware — bears its
+	// own token auth (verified via dock /internal/v1/agent-tokens/verify).
+	// nginx still routes /ws/agent → dock until Phase 4b cutover.
+	r.GET("/ws/agent", p.handleAgentWS)
 
 	// Dock-to-plugin internal API. Loopback-only auth — dock dials
 	// the plugin svc directly on 127.0.0.1 and posts skill.advertise
