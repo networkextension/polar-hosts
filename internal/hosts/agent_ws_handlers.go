@@ -1,10 +1,9 @@
 package hosts
 
-// agent_ws_handlers.go — Phase 4a: /ws/agent WebSocket endpoint.
-// Polar-agents connect here directly once the nginx cutover lands
-// (Phase 4b). Token verification is delegated to dock via the HMAC-gated
-// POST /internal/v1/agent-tokens/verify RPC — polar-hosts never touches
-// dock's agent_tokens table directly.
+// agent_ws_handlers.go — Phase 4a/4b: /ws/agent WebSocket endpoint.
+// Phase 4a: basic WS plumbing + skill dispatch pumps.
+// Phase 4b: bot_id wiring + tool_result/chat_reply frame handling so dock
+//           can forward AI-loop dispatches via the dispatch API endpoints.
 
 import (
 	"encoding/base64"
@@ -52,6 +51,10 @@ func (p *Plugin) handleAgentWS(c *gin.Context) {
 		return
 	}
 
+	botUserID := strings.TrimSpace(c.Query("bot_id"))
+	agentID := strings.TrimSpace(c.Query("agent_id"))
+	workdir := strings.TrimSpace(c.Query("workdir"))
+
 	// Resolve host for this token. A token without a hosts row is allowed
 	// (legacy path before /api/hosts/register); hostID is updated lazily
 	// when the agent sends skill.advertise.
@@ -69,17 +72,22 @@ func (p *Plugin) handleAgentWS(c *gin.Context) {
 	ac := &agentConn{
 		tokenID:            tokenID,
 		userID:             userID,
+		botUserID:          botUserID,
+		agentID:            agentID,
 		hostID:             hostID,
+		workdir:            workdir,
 		send:               make(chan []byte, 64),
 		close:              make(chan struct{}),
+		pending:            map[string]chan agentToolResult{},
+		chatPending:        map[string]chan agentChatReply{},
 		skillPending:       map[int64]chan skillEventFrame{},
 		skillStdoutPending: map[int64]chan []byte{},
 	}
 	if displaced := p.agentHub.register(ac); displaced != nil {
-		log.Printf("[agent ws] kicking previous connection token=%s", tokenID)
+		log.Printf("[agent ws] kicking previous connection token=%s bot=%s", tokenID, botUserID)
 		close(displaced.close)
 	}
-	log.Printf("[agent ws] connected token=%s user=%s host=%s", tokenID, userID, hostID)
+	log.Printf("[agent ws] connected token=%s bot=%s agent=%s host=%s", tokenID, botUserID, agentID, hostID)
 
 	go p.runAgentWritePump(conn, ac)
 	p.runAgentReadPump(conn, ac)
@@ -93,9 +101,9 @@ func (p *Plugin) verifyAgentToken(raw string) (tokenID, userID string, err error
 		return "", "", err
 	}
 	var result struct {
-		Valid    bool   `json:"valid"`
-		TokenID  string `json:"token_id"`
-		UserID   string `json:"user_id"`
+		Valid   bool   `json:"valid"`
+		TokenID string `json:"token_id"`
+		UserID  string `json:"user_id"`
 	}
 	if err := readJSON(resp, &result); err != nil {
 		return "", "", err
@@ -139,7 +147,7 @@ func (p *Plugin) runAgentReadPump(conn *websocket.Conn, ac *agentConn) {
 			close(ac.close)
 		}
 		_ = conn.Close()
-		log.Printf("[agent ws] disconnected token=%s host=%s", ac.tokenID, ac.hostID)
+		log.Printf("[agent ws] disconnected token=%s bot=%s host=%s", ac.tokenID, ac.botUserID, ac.hostID)
 	}()
 
 	conn.SetReadLimit(8 << 20)
@@ -172,10 +180,17 @@ func (p *Plugin) runAgentReadPump(conn *websocket.Conn, ac *agentConn) {
 			var h struct {
 				Capabilities []string `json:"capabilities"`
 				Tool         string   `json:"tool"`
+				Workdir      string   `json:"workdir,omitempty"`
 			}
 			if err := json.Unmarshal(raw, &h); err == nil {
-				// capabilities/tool not stored on agentConn here; logged only
-				log.Printf("[agent ws] hello token=%s caps=%v tool=%q", ac.tokenID, h.Capabilities, h.Tool)
+				ac.capabilities = h.Capabilities
+				if h.Tool != "" {
+					ac.tool = strings.TrimSpace(h.Tool)
+				}
+				if h.Workdir != "" && ac.workdir == "" {
+					ac.workdir = strings.TrimSpace(h.Workdir)
+				}
+				log.Printf("[agent ws] hello token=%s bot=%s caps=%v tool=%q", ac.tokenID, ac.botUserID, h.Capabilities, h.Tool)
 			}
 			// Lazily resolve hostID on hello if not already set.
 			if ac.hostID == "" {
@@ -183,6 +198,22 @@ func (p *Plugin) runAgentReadPump(conn *websocket.Conn, ac *agentConn) {
 					ac.hostID = host.ID
 				}
 			}
+
+		case "tool_result":
+			var r agentToolResult
+			if err := json.Unmarshal(raw, &r); err != nil {
+				log.Printf("[agent ws] tool_result parse failed token=%s: %v", ac.tokenID, err)
+				continue
+			}
+			ac.deliverResult(r)
+
+		case "chat_reply":
+			var r agentChatReply
+			if err := json.Unmarshal(raw, &r); err != nil {
+				log.Printf("[agent ws] chat_reply parse failed token=%s: %v", ac.tokenID, err)
+				continue
+			}
+			ac.deliverChatReply(r)
 
 		case "skill.advertise":
 			var msg struct {
