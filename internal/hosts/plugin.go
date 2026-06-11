@@ -222,13 +222,16 @@ func (p *Plugin) RegisterRoutes(r gin.IRouter) {
 	// touches here when the WS agent_hub sees an advertise frame.
 	// See internal_touch.go.
 	r.POST("/internal/v1/hosts/touch", p.handleInternalHostTouch)
-	// polar-dock#351: separate channel for the static host_info blob
-	// (virt, memory_bytes, cpu_model, …) the agent sends in its hello
-	// frame on (re)connect. See internal_hello.go.
 	r.POST("/internal/v1/hosts/hello", p.handleInternalHostsHello)
-	// P3-followup (companion to polar-dock#332): loopback-trusted
-	// catalog lookup. See internal_skill_catalog.go.
 	r.GET("/internal/v1/skill-catalog/:id", p.handleInternalSkillCatalogGet)
+
+	// Phase 4b: dock calls these after the /ws/agent nginx cutover so the
+	// AI chat loop (tool calls, passthrough, research) can reach agents
+	// connected to polar-hosts. Loopback-only — no HMAC required.
+	r.GET("/internal/v1/agents/presence", p.handleInternalAgentPresence)
+	r.POST("/internal/v1/agents/dispatch/tool-call", p.handleInternalAgentDispatchToolCall)
+	r.POST("/internal/v1/agents/dispatch/chat-message", p.handleInternalAgentDispatchChatMessage)
+	r.POST("/internal/v1/agents/dispatch/frame", p.handleInternalAgentDispatchFrame)
 
 	// Mirror dock's /api/hosts/* + /api/host-skills/* + /api/console/*
 	// routes so nginx can flip with a single proxy_pass redirect
