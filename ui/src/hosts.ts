@@ -29,6 +29,15 @@ import { byId } from "@networkextension/polar-ui-common/lib/dom";
 import { hydrateSiteBrand, renderSidebarFoot } from "@networkextension/polar-ui-common/lib/site";
 import { mountPlatformNav } from "@networkextension/polar-ui-common/lib/sidebar";
 import { bindThemeSync, initStoredTheme } from "@networkextension/polar-ui-common/lib/theme";
+import {
+  NEON,
+  NOC,
+  fanPositions,
+  nocChip,
+  nocPanel,
+  nocSpoke,
+  nocSvg,
+} from "@networkextension/polar-ui-common/lib/neon-topo";
 import type { AgentListItem, Host, HostInfo, HostSkill, HostSkillCredential } from "./types/hosts.js";
 
 initStoredTheme();
@@ -221,13 +230,14 @@ const NET_GLYPH: Record<NetKind, string> = {
   other: '<circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>',
 };
 
+// Maps each interface kind onto the shared neon palette (polar-ui-common).
 const NET_COLOR: Record<NetKind, string> = {
-  wifi: "#22d3ee", // cyan
-  cellular: "#fbbf24", // amber
-  ethernet: "#34d399", // green
-  mesh: "#c084fc", // violet
-  bridge: "#60a5fa", // blue
-  other: "#94a3b8", // slate
+  wifi: NEON.cyan,
+  cellular: NEON.amber,
+  ethernet: NEON.green,
+  mesh: NEON.violet,
+  bridge: NEON.blue,
+  other: NEON.slate,
 };
 
 function classifyIface(name: string, os: string, hasBattery?: boolean): { kind: NetKind; label: string } {
@@ -270,80 +280,69 @@ function renderHostNet(host: Host, online: boolean): void {
     return;
   }
 
-  // ---- SVG fan: host node in center, each iface a neon spoke ----
+  // ---- SVG fan: host node in center, each iface a neon spoke (shared kit) ----
   const W = 720;
   const H = 300;
   const cx = W / 2;
   const cy = H / 2;
   const ring = 108;
-  const accent = online ? "#34d399" : "#64748b";
-  const N = ifaces.length;
-  const spokes: string[] = [];
-  const nodes: string[] = [];
-  ifaces.forEach((f, i) => {
-    // fan evenly across a 260° arc (upper-left → clockwise) so spoke labels
-    // never pile up at the bottom of the panel
-    const ang = ((-200 + 260 * (N === 1 ? 0.5 : i / (N - 1))) * Math.PI) / 180;
-    const x = cx + Math.cos(ang) * ring;
-    const y = cy + Math.sin(ang) * ring;
-    const dash = f.kind === "mesh" ? ' stroke-dasharray="6 5"' : "";
-    spokes.push(
-      `<line x1="${cx}" y1="${cy}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" stroke="${f.color}" stroke-width="2" opacity="0.85"${dash} filter="url(#nglow)"/>`,
-    );
+  const accent = online ? NEON.green : NOC.textMuted;
+  const GLOW = "noc-glow"; // nocSvg/nocSpoke default filter id
+  const pts = fanPositions(ifaces.length, cx, cy, ring);
+  const spokes = ifaces.map((f, i) =>
+    nocSpoke({ x1: cx, y1: cy, x2: pts[i].x, y2: pts[i].y, color: f.color, dashed: f.kind === "mesh" }),
+  );
+  // Interface nodes keep side-anchored name/IP labels (the host fan is
+  // horizontal) rather than nocNode's below-node captions, so they stay bespoke.
+  const nodes = ifaces.map((f, i) => {
+    const { x, y } = pts[i];
     const labelRight = x >= cx;
     const lx = x + (labelRight ? 14 : -14);
     const ip = f.ipv4 || (f.ipv6[0] && f.ipv6[0].addr) || "";
-    nodes.push(
-      `<g filter="url(#nglow)"><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="16" fill="#0b1120" stroke="${f.color}" stroke-width="1.6"/>` +
-        `<svg x="${(x - 8).toFixed(1)}" y="${(y - 8).toFixed(1)}" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="${f.color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${f.glyph}</svg></g>` +
-        `<text x="${lx.toFixed(1)}" y="${(y - 2).toFixed(1)}" text-anchor="${labelRight ? "start" : "end"}" fill="#cbd5e1" font-size="11" font-weight="600">${escapeHTML(f.name)}</text>` +
-        `<text x="${lx.toFixed(1)}" y="${(y + 11).toFixed(1)}" text-anchor="${labelRight ? "start" : "end"}" fill="${f.color}" font-size="10" font-family="monospace">${escapeHTML(ip)}</text>`,
+    const anchor = labelRight ? "start" : "end";
+    return (
+      `<g filter="url(#${GLOW})"><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="16" fill="${NOC.nodeFill}" stroke="${f.color}" stroke-width="1.6"/>` +
+      `<svg x="${(x - 8).toFixed(1)}" y="${(y - 8).toFixed(1)}" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="${f.color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${f.glyph}</svg></g>` +
+      `<text x="${lx.toFixed(1)}" y="${(y - 2).toFixed(1)}" text-anchor="${anchor}" fill="${NOC.textDim}" font-size="11" font-weight="600">${escapeHTML(f.name)}</text>` +
+      `<text x="${lx.toFixed(1)}" y="${(y + 11).toFixed(1)}" text-anchor="${anchor}" fill="${f.color}" font-size="10" font-family="monospace">${escapeHTML(ip)}</text>`
     );
   });
   const hostGlyph = deviceIconSVG(host, 26).replace(/stroke="#[0-9a-f]+"/i, `stroke="${accent}"`);
   const center =
-    `<circle cx="${cx}" cy="${cy}" r="34" fill="#0b1120" stroke="${accent}" stroke-width="2" filter="url(#nglow)"/>` +
+    `<circle cx="${cx}" cy="${cy}" r="34" fill="${NOC.nodeFill}" stroke="${accent}" stroke-width="2" filter="url(#${GLOW})"/>` +
     `<circle cx="${cx}" cy="${cy}" r="42" fill="none" stroke="${accent}" stroke-width="1" opacity="0.35"/>` +
     `<g transform="translate(${cx - 13},${cy - 16})">${hostGlyph}</g>` +
-    `<text x="${cx}" y="${cy + 22}" text-anchor="middle" fill="#e2e8f0" font-size="10" font-weight="600">${escapeHTML(host.name).slice(0, 16)}</text>`;
-  const svg =
-    `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" role="img" aria-label="host network">` +
-    `<defs><filter id="nglow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>` +
-    spokes.join("") +
-    center +
-    nodes.join("") +
-    `</svg>`;
+    `<text x="${cx}" y="${cy + 22}" text-anchor="middle" fill="${NOC.textBright}" font-size="10" font-weight="600">${escapeHTML(host.name).slice(0, 16)}</text>`;
+  const svg = nocSvg({
+    width: W,
+    height: H,
+    inner: spokes.join("") + center + nodes.join(""),
+    ariaLabel: "host network",
+  });
 
-  // ---- interface legend chips ----
+  // ---- interface legend chips (shared nocChip) ----
   const wifiMac = host.host_info?.wifi_mac;
   const chips = ifaces
     .map((f) => {
+      const lines: string[] = [];
+      if (f.ipv4) {
+        lines.push(`<div style="font-family:monospace;font-size:11px;color:${NOC.textDim}">${escapeHTML(f.ipv4)}</div>`);
+      }
       const v6 = f.ipv6
         .map(
           (a) =>
-            `<span style="font-family:monospace;font-size:10px;color:#94a3b8">${escapeHTML(a.addr)} <span style="color:${a.private ? "#fbbf24" : "#34d399"}">${a.private ? "私网" : "公网"}</span></span>`,
+            `<span style="font-family:monospace;font-size:10px;color:${NEON.slate}">${escapeHTML(a.addr)} <span style="color:${a.private ? NEON.amber : NEON.green}">${a.private ? "私网" : "公网"}</span></span>`,
         )
         .join("<br>");
-      const mac = f.kind === "wifi" && wifiMac ? `<div style="font-family:monospace;font-size:10px;color:#64748b">MAC ${escapeHTML(wifiMac)}</div>` : "";
-      return (
-        `<div style="background:#0b1120;border:1px solid ${f.color}40;border-left:3px solid ${f.color};border-radius:8px;padding:8px 10px;min-width:0">` +
-        `<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">` +
-        `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="${f.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${f.glyph}</svg>` +
-        `<span style="color:#e2e8f0;font-size:12px;font-weight:600">${escapeHTML(f.name)}</span>` +
-        `<span style="color:${f.color};font-size:10px;margin-left:auto">${escapeHTML(f.label)}</span></div>` +
-        (f.ipv4 ? `<div style="font-family:monospace;font-size:11px;color:#cbd5e1">${escapeHTML(f.ipv4)}</div>` : "") +
-        (v6 ? `<div style="margin-top:2px">${v6}</div>` : "") +
-        mac +
-        `</div>`
-      );
+      if (v6) lines.push(`<div style="margin-top:2px">${v6}</div>`);
+      if (f.kind === "wifi" && wifiMac) {
+        lines.push(`<div style="font-family:monospace;font-size:10px;color:${NOC.textMuted}">MAC ${escapeHTML(wifiMac)}</div>`);
+      }
+      return nocChip({ color: f.color, glyph: f.glyph, name: f.name, badge: f.label, lines });
     })
     .join("");
 
-  hostsNetPanel.innerHTML =
-    `<div style="background:radial-gradient(120% 100% at 50% 0%, #0d1426 0%, #070a14 70%);border:1px solid #1e293b;border-radius:12px;padding:14px 16px 16px;box-shadow:inset 0 0 60px rgba(34,211,238,.04)">` +
-    svg +
-    `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-top:10px">${chips}</div>` +
-    `</div>`;
+  hostsNetPanel.innerHTML = nocPanel({ svg, chipsHTML: chips });
 }
 
 // ── list rendering ──────────────────────────────────────────────────────
