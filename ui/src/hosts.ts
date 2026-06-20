@@ -55,6 +55,7 @@ function wgLinkURL(hostId: string): string {
 const hostsLastSeen = byId<HTMLElement>("hostsLastSeen");
 const hostsLastSeenIP = byId<HTMLElement>("hostsLastSeenIP");
 const hostsHardwareGrid = byId<HTMLElement>("hostsHardwareGrid");
+const hostsNetPanel = byId<HTMLElement>("hostsNetPanel");
 const hostsAgentsList = byId<HTMLElement>("hostsAgentsList");
 const hostsDeleteBtn = byId<HTMLButtonElement>("hostsDeleteBtn");
 
@@ -189,6 +190,162 @@ function deviceBadge(h: Host, online: boolean): string {
   return `<div style="flex:0 0 auto; width:36px; height:36px; display:flex; align-items:center; justify-content:center; border-radius:9px; background:var(--surface-2,#f2f2f7); box-shadow:${online ? "0 0 0 2px #34c759 inset" : "none"};">${deviceIconSVG(h)}</div>`;
 }
 
+// ── 网络拓扑 — dark-NOC physical-network panel ────────────────────────────
+// Classifies each interface the agent reported into a physical kind (wifi /
+// ethernet / cellular) or the wg mesh link, each with a neon accent. The whole
+// thing renders on a self-contained dark "big-screen" panel (its own palette,
+// not the platform theme) so it reads like a data-center NOC widget.
+
+type NetKind = "wifi" | "ethernet" | "cellular" | "mesh" | "bridge" | "other";
+
+interface NetIface {
+  name: string;
+  kind: NetKind;
+  color: string;
+  glyph: string; // inner SVG of a 24-box icon
+  label: string;
+  ipv4?: string;
+  ipv6: { addr: string; private: boolean }[];
+}
+
+const NET_GLYPH: Record<NetKind, string> = {
+  // wifi: arcs + dot
+  wifi: '<path d="M5 13a10 10 0 0 1 14 0"/><path d="M8.5 16.5a5 5 0 0 1 7 0"/><path d="M2 8.82a15 15 0 0 1 20 0"/><line x1="12" y1="20" x2="12.01" y2="20"/>',
+  // cellular: signal bars
+  cellular: '<path d="M2 20h.01"/><path d="M7 20v-4"/><path d="M12 20v-8"/><path d="M17 20V8"/><path d="M22 4v16"/>',
+  // ethernet: rack/plug
+  ethernet: '<rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>',
+  // mesh/wg: shield
+  mesh: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>',
+  bridge: '<path d="M6 9v12"/><path d="M18 9v12"/><path d="M3 9a9 9 0 0 1 18 0"/><path d="M3 14h18"/>',
+  other: '<circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>',
+};
+
+const NET_COLOR: Record<NetKind, string> = {
+  wifi: "#22d3ee", // cyan
+  cellular: "#fbbf24", // amber
+  ethernet: "#34d399", // green
+  mesh: "#c084fc", // violet
+  bridge: "#60a5fa", // blue
+  other: "#94a3b8", // slate
+};
+
+function classifyIface(name: string, os: string, hasBattery?: boolean): { kind: NetKind; label: string } {
+  const n = name.toLowerCase();
+  if (/^(utun|wgc|wg)\d/.test(n) || n === "wg0") return { kind: "mesh", label: "WG Mesh" };
+  if (/^(pdp_ip|rmnet|wwan|ppp|ce|qmi)/.test(n)) return { kind: "cellular", label: "蜂窝 / 4G" };
+  if (/^(wlan|wl|wlp|airport)/.test(n)) return { kind: "wifi", label: "Wi-Fi" };
+  if (/^bridge/.test(n)) return { kind: "bridge", label: "网桥" };
+  if ((os === "darwin" || os === "macos") && n === "en0") {
+    // en0 is wifi on laptops, ethernet on desktops (no battery).
+    return hasBattery ? { kind: "wifi", label: "Wi-Fi" } : { kind: "ethernet", label: "以太网" };
+  }
+  if (/^(en|eth|enp|eno|ens|em|igb|dpni|bond)/.test(n)) return { kind: "ethernet", label: "以太网" };
+  return { kind: "other", label: "其他" };
+}
+
+function collectIfaces(host: Host): NetIface[] {
+  const info = host.host_info || {};
+  const v4 = info.ipv4_by_iface || {};
+  const v6 = info.ipv6_by_iface || {};
+  const names = new Set<string>([...Object.keys(v4), ...Object.keys(v6)]);
+  const out: NetIface[] = [];
+  for (const name of names) {
+    if (/^lo\d*$|^lo$|^utun[0-3]$/.test(name) && !(v4[name] || (v6[name] || []).length)) continue;
+    if (name === "lo" || name === "lo0") continue;
+    const { kind, label } = classifyIface(name, host.os, host.host_info?.has_battery);
+    out.push({ name, kind, label, color: NET_COLOR[kind], glyph: NET_GLYPH[kind], ipv4: v4[name], ipv6: v6[name] || [] });
+  }
+  // physical first (wifi, cellular, ethernet, bridge, other), mesh last
+  const rank: Record<NetKind, number> = { wifi: 0, cellular: 1, ethernet: 2, bridge: 3, other: 4, mesh: 5 };
+  out.sort((a, b) => rank[a.kind] - rank[b.kind] || a.name.localeCompare(b.name));
+  return out;
+}
+
+// renderHostNet paints the dark-NOC connectivity fan + the interface legend.
+function renderHostNet(host: Host, online: boolean): void {
+  const ifaces = collectIfaces(host);
+  if (!ifaces.length) {
+    hostsNetPanel.innerHTML = `<div class="chat-empty">尚未上报网络接口。等 polar-agent 重新 attach 一次就会自动登记。</div>`;
+    return;
+  }
+
+  // ---- SVG fan: host node in center, each iface a neon spoke ----
+  const W = 720;
+  const H = 300;
+  const cx = W / 2;
+  const cy = H / 2;
+  const ring = 108;
+  const accent = online ? "#34d399" : "#64748b";
+  const N = ifaces.length;
+  const spokes: string[] = [];
+  const nodes: string[] = [];
+  ifaces.forEach((f, i) => {
+    // fan evenly across a 260° arc (upper-left → clockwise) so spoke labels
+    // never pile up at the bottom of the panel
+    const ang = ((-200 + 260 * (N === 1 ? 0.5 : i / (N - 1))) * Math.PI) / 180;
+    const x = cx + Math.cos(ang) * ring;
+    const y = cy + Math.sin(ang) * ring;
+    const dash = f.kind === "mesh" ? ' stroke-dasharray="6 5"' : "";
+    spokes.push(
+      `<line x1="${cx}" y1="${cy}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" stroke="${f.color}" stroke-width="2" opacity="0.85"${dash} filter="url(#nglow)"/>`,
+    );
+    const labelRight = x >= cx;
+    const lx = x + (labelRight ? 14 : -14);
+    const ip = f.ipv4 || (f.ipv6[0] && f.ipv6[0].addr) || "";
+    nodes.push(
+      `<g filter="url(#nglow)"><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="16" fill="#0b1120" stroke="${f.color}" stroke-width="1.6"/>` +
+        `<svg x="${(x - 8).toFixed(1)}" y="${(y - 8).toFixed(1)}" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="${f.color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${f.glyph}</svg></g>` +
+        `<text x="${lx.toFixed(1)}" y="${(y - 2).toFixed(1)}" text-anchor="${labelRight ? "start" : "end"}" fill="#cbd5e1" font-size="11" font-weight="600">${escapeHTML(f.name)}</text>` +
+        `<text x="${lx.toFixed(1)}" y="${(y + 11).toFixed(1)}" text-anchor="${labelRight ? "start" : "end"}" fill="${f.color}" font-size="10" font-family="monospace">${escapeHTML(ip)}</text>`,
+    );
+  });
+  const hostGlyph = deviceIconSVG(host, 26).replace(/stroke="#[0-9a-f]+"/i, `stroke="${accent}"`);
+  const center =
+    `<circle cx="${cx}" cy="${cy}" r="34" fill="#0b1120" stroke="${accent}" stroke-width="2" filter="url(#nglow)"/>` +
+    `<circle cx="${cx}" cy="${cy}" r="42" fill="none" stroke="${accent}" stroke-width="1" opacity="0.35"/>` +
+    `<g transform="translate(${cx - 13},${cy - 16})">${hostGlyph}</g>` +
+    `<text x="${cx}" y="${cy + 22}" text-anchor="middle" fill="#e2e8f0" font-size="10" font-weight="600">${escapeHTML(host.name).slice(0, 16)}</text>`;
+  const svg =
+    `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" role="img" aria-label="host network">` +
+    `<defs><filter id="nglow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>` +
+    spokes.join("") +
+    center +
+    nodes.join("") +
+    `</svg>`;
+
+  // ---- interface legend chips ----
+  const wifiMac = host.host_info?.wifi_mac;
+  const chips = ifaces
+    .map((f) => {
+      const v6 = f.ipv6
+        .map(
+          (a) =>
+            `<span style="font-family:monospace;font-size:10px;color:#94a3b8">${escapeHTML(a.addr)} <span style="color:${a.private ? "#fbbf24" : "#34d399"}">${a.private ? "私网" : "公网"}</span></span>`,
+        )
+        .join("<br>");
+      const mac = f.kind === "wifi" && wifiMac ? `<div style="font-family:monospace;font-size:10px;color:#64748b">MAC ${escapeHTML(wifiMac)}</div>` : "";
+      return (
+        `<div style="background:#0b1120;border:1px solid ${f.color}40;border-left:3px solid ${f.color};border-radius:8px;padding:8px 10px;min-width:0">` +
+        `<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">` +
+        `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="${f.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${f.glyph}</svg>` +
+        `<span style="color:#e2e8f0;font-size:12px;font-weight:600">${escapeHTML(f.name)}</span>` +
+        `<span style="color:${f.color};font-size:10px;margin-left:auto">${escapeHTML(f.label)}</span></div>` +
+        (f.ipv4 ? `<div style="font-family:monospace;font-size:11px;color:#cbd5e1">${escapeHTML(f.ipv4)}</div>` : "") +
+        (v6 ? `<div style="margin-top:2px">${v6}</div>` : "") +
+        mac +
+        `</div>`
+      );
+    })
+    .join("");
+
+  hostsNetPanel.innerHTML =
+    `<div style="background:radial-gradient(120% 100% at 50% 0%, #0d1426 0%, #070a14 70%);border:1px solid #1e293b;border-radius:12px;padding:14px 16px 16px;box-shadow:inset 0 0 60px rgba(34,211,238,.04)">` +
+    svg +
+    `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-top:10px">${chips}</div>` +
+    `</div>`;
+}
+
 // ── list rendering ──────────────────────────────────────────────────────
 function renderHostsList(): void {
   if (!hosts.length) {
@@ -269,6 +426,10 @@ function renderHostDetail(host: Host): void {
 
   hostsLastSeen.textContent = host.last_seen_at ? formatRelative(host.last_seen_at) + " （" + new Date(host.last_seen_at).toLocaleString() + "）" : "—";
   hostsLastSeenIP.textContent = host.last_seen_ip ? `IP: ${host.last_seen_ip}` : "IP: —";
+
+  // 网络拓扑 — dark-NOC connectivity panel: this host's physical NICs
+  // (wifi/eth/cellular) + its wg mesh link, fanned out from a center node.
+  renderHostNet(host, online);
 
   // 硬件信息 — render the static host_info facts (model/cpu/mem/disk/wifi
   // + battery/fan chips). Falls back gracefully when a field is missing.

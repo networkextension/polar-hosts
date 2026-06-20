@@ -29,6 +29,10 @@ export type HostInfo = {
   disk_total_bytes?: number;
   has_battery?: boolean;
   has_fan?: boolean;
+  // Per-interface networking (agent collects on every hello).
+  ipv4_by_iface?: Record<string, string>;
+  ipv6_by_iface?: Record<string, { addr: string; private: boolean }[]>;
+  wg_pubkeys?: Record<string, string>;
 };
 
 export type Host = {
