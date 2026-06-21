@@ -37,6 +37,7 @@ import {
   nocPanel,
   nocSpoke,
   nocSvg,
+  ringPositions,
 } from "@networkextension/polar-ui-common/lib/neon-topo";
 import type { AgentListItem, Host, HostInfo, HostSkill, HostSkillCredential } from "./types/hosts.js";
 
@@ -45,6 +46,13 @@ bindThemeSync();
 
 // ── DOM ────────────────────────────────────────────────────────────────
 const hostsList = byId<HTMLElement>("hostsList");
+const hostsTopo = byId<HTMLElement>("hostsTopo");
+const hostsTopoSummary = byId<HTMLElement>("hostsTopoSummary");
+const hostsListAside = byId<HTMLElement>("hostsListAside");
+const hostsListToggle = byId<HTMLButtonElement>("hostsListToggle");
+const hostsDrawer = byId<HTMLElement>("hostsDrawer");
+const hostsDrawerBackdrop = byId<HTMLElement>("hostsDrawerBackdrop");
+const hostsDrawerClose = byId<HTMLButtonElement>("hostsDrawerClose");
 const hostsEmpty = byId<HTMLElement>("hostsEmpty");
 const hostsPanel = byId<HTMLElement>("hostsPanel");
 const hostsName = byId<HTMLElement>("hostsName");
@@ -346,6 +354,85 @@ function renderHostNet(host: Host, online: boolean): void {
 }
 
 // ── list rendering ──────────────────────────────────────────────────────
+// ── 主机拓扑 (fleet map — the landing view, 一眼尽收) ──────────────────────
+// All hosts fanned on concentric rings around a center "fleet" node, colored
+// by online/offline. Click a node → right drawer with that host's detail.
+function renderHostsTopo(): void {
+  if (!hosts.length) {
+    hostsTopo.innerHTML = `<div class="chat-empty">还没有主机。点右上角「＋ 注册主机」开始。</div>`;
+    hostsTopoSummary.textContent = "0 台";
+    return;
+  }
+  const onlineN = hosts.filter((h) => isOnline(h)).length;
+  hostsTopoSummary.textContent = `${hosts.length} 台 · ${onlineN} 在线 · ${hosts.length - onlineN} 离线`;
+
+  const GLOW = "noc-glow";
+  const W = 960;
+  const cx = W / 2;
+  const perRing = 9;
+  const rings = Math.ceil(hosts.length / perRing);
+  const H = Math.max(560, 200 + rings * 160);
+  const cy = H / 2;
+  const spokes: string[] = [];
+  const nodes: string[] = [];
+  for (let r = 0; r < rings; r++) {
+    const ringHosts = hosts.slice(r * perRing, r * perRing + perRing);
+    const radius = 130 + r * 140;
+    const pts = ringPositions(ringHosts.length, cx, cy, radius, -90 + r * 20);
+    ringHosts.forEach((h, i) => {
+      const { x, y } = pts[i];
+      const online = isOnline(h);
+      const col = online ? NEON.green : NEON.slate;
+      const active = h.id === activeHostId;
+      spokes.push(nocSpoke({ x1: cx, y1: cy, x2: x, y2: y, color: col, opacity: online ? 0.7 : 0.3 }));
+      const glyph = deviceIconSVG(h, 22).replace(/stroke="#[0-9a-f]+"/i, `stroke="${col}"`);
+      const nm = h.name.length > 14 ? h.name.slice(0, 13) + "…" : h.name;
+      const sub = online ? "online" : "offline · " + formatRelative(h.last_seen_at);
+      nodes.push(
+        `<g data-host-id="${escapeHTML(h.id)}" style="cursor:pointer" filter="url(#${GLOW})">` +
+          `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${active ? 24 : 20}" fill="${NOC.nodeFill}" stroke="${col}" stroke-width="${active ? 2.6 : 1.6}"/>` +
+          `<g transform="translate(${(x - 11).toFixed(1)},${(y - 11).toFixed(1)})">${glyph}</g></g>` +
+          `<text x="${x.toFixed(1)}" y="${(y + 34).toFixed(1)}" text-anchor="middle" fill="${NOC.textDim}" font-size="11" font-weight="600" style="pointer-events:none">${escapeHTML(nm)}</text>` +
+          `<text x="${x.toFixed(1)}" y="${(y + 46).toFixed(1)}" text-anchor="middle" fill="${col}" font-size="9" style="pointer-events:none">${escapeHTML(sub)}</text>`,
+      );
+    });
+  }
+  const center =
+    `<circle cx="${cx}" cy="${cy}" r="34" fill="${NOC.nodeFill}" stroke="${NEON.cyan}" stroke-width="2" filter="url(#${GLOW})"/>` +
+    `<circle cx="${cx}" cy="${cy}" r="42" fill="none" stroke="${NEON.cyan}" stroke-width="1" opacity="0.3"/>` +
+    `<text x="${cx}" y="${(cy - 1).toFixed(1)}" text-anchor="middle" fill="${NOC.textBright}" font-size="14" font-weight="700">${hosts.length}</text>` +
+    `<text x="${cx}" y="${(cy + 13).toFixed(1)}" text-anchor="middle" fill="${NEON.cyan}" font-size="9">HOSTS</text>`;
+  const svg = nocSvg({ width: W, height: H, inner: spokes.join("") + center + nodes.join(""), ariaLabel: "host fleet topology" });
+  hostsTopo.innerHTML = nocPanel({ svg });
+  hostsTopo.querySelectorAll<SVGElement>("[data-host-id]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const id = el.getAttribute("data-host-id");
+      if (id) void openHost(id);
+    });
+  });
+}
+
+// ── right drawer (host detail) ────────────────────────────────────────────
+function openDrawer(): void {
+  hostsDrawer.style.transform = "translateX(0)";
+  hostsDrawer.setAttribute("aria-hidden", "false");
+  hostsDrawerBackdrop.hidden = false;
+}
+function closeDrawer(): void {
+  hostsDrawer.style.transform = "translateX(100%)";
+  hostsDrawer.setAttribute("aria-hidden", "true");
+  hostsDrawerBackdrop.hidden = true;
+  activeHostId = null;
+  activeHost = null;
+  renderHostsTopo();
+  renderHostsList();
+}
+hostsListToggle.addEventListener("click", () => {
+  hostsListAside.hidden = !hostsListAside.hidden;
+});
+hostsDrawerClose.addEventListener("click", () => closeDrawer());
+hostsDrawerBackdrop.addEventListener("click", () => closeDrawer());
+
 function renderHostsList(): void {
   if (!hosts.length) {
     hostsList.innerHTML = `<div class="chat-empty">还没有主机。点右上角「＋ 注册主机」开始。</div>`;
@@ -784,21 +871,21 @@ async function loadHosts(): Promise<void> {
     return;
   }
   hosts = data.hosts || [];
+  renderHostsTopo();
   renderHostsList();
   if (activeHostId) {
     const stillExists = hosts.find((h) => h.id === activeHostId);
     if (!stillExists) {
-      activeHostId = null;
-      activeHost = null;
-      hostsEmpty.hidden = false;
-      hostsPanel.hidden = true;
+      closeDrawer();
     }
   }
 }
 
 async function openHost(id: string): Promise<void> {
   activeHostId = id;
-  renderHostsList(); // re-render to update active highlight
+  renderHostsTopo(); // re-render to highlight the active node
+  renderHostsList();
+  openDrawer();
   const { response, data } = await fetchHost(id);
   if (!response.ok || !data.host) {
     hostsEmpty.hidden = false;
