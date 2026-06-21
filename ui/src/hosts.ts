@@ -37,8 +37,18 @@ import {
   nocPanel,
   nocSpoke,
   nocSvg,
-  ringPositions,
 } from "@networkextension/polar-ui-common/lib/neon-topo";
+
+// Even points on an ellipse — wide rings for 16:9/16:10 screens so the whole
+// fleet fits horizontally without vertical scroll. startDeg from top, clockwise.
+function ellipseLayout(n: number, cx: number, cy: number, rx: number, ry: number, startDeg = -90): { x: number; y: number }[] {
+  const out: { x: number; y: number }[] = [];
+  for (let i = 0; i < n; i++) {
+    const ang = ((startDeg + (360 * i) / Math.max(1, n)) * Math.PI) / 180;
+    out.push({ x: cx + Math.cos(ang) * rx, y: cy + Math.sin(ang) * ry });
+  }
+  return out;
+}
 import type { AgentListItem, Host, HostInfo, HostSkill, HostSkillCredential } from "./types/hosts.js";
 
 initStoredTheme();
@@ -368,18 +378,21 @@ function renderHostsTopo(): void {
   hostsTopoSummary.textContent = `${hosts.length} 台 · ${onlineN} 在线 · ${hosts.length - onlineN} 离线`;
 
   const GLOW = "noc-glow";
-  const W = 960;
+  // 16:9 wide canvas + elliptical rings: spread nodes horizontally so the whole
+  // fleet fits without vertical scroll on a 16:9 / 16:10 screen.
+  const W = 1280;
+  const H = 720;
   const cx = W / 2;
-  const perRing = 9;
-  const rings = Math.ceil(hosts.length / perRing);
-  const H = Math.max(560, 200 + rings * 160);
   const cy = H / 2;
+  const perRing = 12;
+  const rings = Math.ceil(hosts.length / perRing);
   const spokes: string[] = [];
   const nodes: string[] = [];
   for (let r = 0; r < rings; r++) {
     const ringHosts = hosts.slice(r * perRing, r * perRing + perRing);
-    const radius = 130 + r * 140;
-    const pts = ringPositions(ringHosts.length, cx, cy, radius, -90 + r * 20);
+    const rx = 230 + r * 260;
+    const ry = Math.min(rx * 0.56, cy - 80);
+    const pts = ellipseLayout(ringHosts.length, cx, cy, rx, ry, -90 + r * 16);
     ringHosts.forEach((h, i) => {
       const { x, y } = pts[i];
       const online = isOnline(h);
