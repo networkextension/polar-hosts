@@ -50,6 +50,7 @@ const hostsTopo = byId<HTMLElement>("hostsTopo");
 const hostsTopoSummary = byId<HTMLElement>("hostsTopoSummary");
 const hostsListAside = byId<HTMLElement>("hostsListAside");
 const hostsListToggle = byId<HTMLButtonElement>("hostsListToggle");
+const hostsFsBtn = byId<HTMLButtonElement>("hostsFsBtn");
 const hostsDrawer = byId<HTMLElement>("hostsDrawer");
 const hostsDrawerBackdrop = byId<HTMLElement>("hostsDrawerBackdrop");
 const hostsDrawerClose = byId<HTMLButtonElement>("hostsDrawerClose");
@@ -430,6 +431,31 @@ function closeDrawer(): void {
 hostsListToggle.addEventListener("click", () => {
   hostsListAside.hidden = !hostsListAside.hidden;
 });
+
+// Fullscreen the fleet topology (NOC big-screen). Safari needs the webkit
+// prefix. On enter, give the container a dark backdrop + padding so the
+// width:100% SVG scales up cleanly; revert on exit.
+function fsActive(): boolean {
+  const d = document as Document & { webkitFullscreenElement?: Element };
+  return !!(d.fullscreenElement || d.webkitFullscreenElement);
+}
+function syncFsUI(): void {
+  const on = fsActive();
+  hostsTopo.style.background = on ? "#070a14" : "";
+  hostsTopo.style.padding = on ? "24px" : "0 16px 16px";
+  hostsFsBtn.textContent = on ? "⛶ 退出全屏" : "⛶ 全屏";
+}
+hostsFsBtn.addEventListener("click", () => {
+  const el = hostsTopo as HTMLElement & { webkitRequestFullscreen?: () => void };
+  const d = document as Document & { webkitExitFullscreen?: () => void };
+  if (fsActive()) {
+    (d.exitFullscreen || d.webkitExitFullscreen)?.call(d);
+  } else {
+    (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el);
+  }
+});
+document.addEventListener("fullscreenchange", syncFsUI);
+document.addEventListener("webkitfullscreenchange", syncFsUI);
 hostsDrawerClose.addEventListener("click", () => closeDrawer());
 hostsDrawerBackdrop.addEventListener("click", () => closeDrawer());
 
