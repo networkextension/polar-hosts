@@ -22,6 +22,7 @@ import {
   fetchHostSkillCredentials,
   fetchHostSkillsForHost,
   fetchHosts,
+  fetchHostsTopology,
   putHostSkillCredential,
   renameHostSkill,
 } from "./api/hosts.js";
@@ -49,7 +50,16 @@ function ellipseLayout(n: number, cx: number, cy: number, rx: number, ry: number
   }
   return out;
 }
-import type { AgentListItem, Host, HostInfo, HostSkill, HostSkillCredential } from "./types/hosts.js";
+import type {
+  AgentListItem,
+  Host,
+  HostInfo,
+  HostSkill,
+  HostSkillCredential,
+  Topology,
+  TopoNet,
+  TopoNode,
+} from "./types/hosts.js";
 
 initStoredTheme();
 bindThemeSync();
@@ -104,6 +114,11 @@ const logoutBtn = byId<HTMLButtonElement>("logoutBtn");
 let hosts: Host[] = [];
 let activeHostId: string | null = null;
 let activeHost: Host | null = null;
+// Topology tabs: "all" = the existing fleet star; the three networks are
+// fetched from /api/hosts/topology and rendered as central-switch stars.
+type TopoTab = "all" | "thunderbolt" | "lan" | "wg";
+let activeTopoTab: TopoTab = "all";
+let topology: Topology | null = null;
 // P1d: persistent host_skill rows + per-skill credential lists,
 // populated when a host is opened. Keyed by host_skill_id.
 let activeHostSkills: HostSkill[] = [];
@@ -426,6 +441,152 @@ function renderHostsTopo(): void {
   });
 }
 
+// ── network-topology tabs (Thunderbolt / LAN / WG) ────────────────────────
+//
+// Each tab renders the selected network as a star around a central 交换机/hub
+// (net.center), with each host that has a NIC on the network as a spoke. Reuses
+// the same neon-topo kit as the fleet view. "all" falls back to renderHostsTopo.
+
+const TOPO_TABS = byId<HTMLElement>("hostsTopoTabs");
+
+// Per-kind accent for the central switch + the legend.
+function netAccent(kind: string): string {
+  if (kind === "thunderbolt") return "#f5a623"; // amber — 雷电
+  if (kind === "wg") return NEON.cyan; // overlay
+  return NEON.green; // lan
+}
+
+// Color of a single host node (spoke endpoint).
+function nodeColor(n: TopoNode): string {
+  if (n.conflict) return "#f87171"; // IP conflict
+  if (n.is_hub) return "#fbbf24"; // wg hub
+  return n.online ? NEON.green : NEON.slate;
+}
+
+// Native tooltip text for a node — every NIC it has on this network.
+function nodeTitle(n: TopoNode): string {
+  const lines = n.ifaces.map((f) => {
+    const bits = [f.iface, f.ip || "—", f.mac || ""].filter(Boolean).join(" · ");
+    return f.stale ? `${bits}  (未连接)` : bits;
+  });
+  return `${n.name}\n${lines.join("\n")}`;
+}
+
+function renderNetworkTopo(net: TopoNet): void {
+  const accent = netAccent(net.kind);
+  const onlineN = net.nodes.filter((n) => n.online).length;
+  const conflictN = net.nodes.filter((n) => n.conflict).length;
+  hostsTopoSummary.innerHTML =
+    `${net.nodes.length} 个节点 · ${onlineN} 在线` +
+    (conflictN ? ` · <span style="color:#f87171">⚠ ${conflictN} 冲突</span>` : "");
+
+  if (!net.nodes.length) {
+    hostsTopo.innerHTML = `<div class="chat-empty">「${escapeHTML(net.label)}」暂无节点。${net.kind === "thunderbolt" ? "雷电网络需主机升级到 0.4 agent 后上报。" : ""}</div>`;
+    return;
+  }
+
+  const GLOW = "noc-glow";
+  const W = 1280;
+  const H = 720;
+  const cx = W / 2;
+  const cy = H / 2;
+  const perRing = 12;
+  const rings = Math.ceil(net.nodes.length / perRing);
+  const spokes: string[] = [];
+  const nodes: string[] = [];
+  for (let r = 0; r < rings; r++) {
+    const ringNodes = net.nodes.slice(r * perRing, r * perRing + perRing);
+    const rx = 250 + r * 260;
+    const ry = Math.min(rx * 0.56, cy - 90);
+    const pts = ellipseLayout(ringNodes.length, cx, cy, rx, ry, -90 + r * 16);
+    ringNodes.forEach((n, i) => {
+      const { x, y } = pts[i];
+      const col = nodeColor(n);
+      const active = n.host_id === activeHostId;
+      // A stale (un-cabled TB) node hangs off a dashed, faint spoke.
+      const stale = n.ifaces.every((f) => f.stale);
+      spokes.push(
+        nocSpoke({ x1: cx, y1: cy, x2: x, y2: y, color: col, dashed: stale, opacity: n.online && !stale ? 0.7 : 0.28 }),
+      );
+      const nm = n.name.length > 14 ? n.name.slice(0, 13) + "…" : n.name;
+      // primary address shown under the node (first iface with an IP), or 未连接
+      const ipIf = n.ifaces.find((f) => f.ip);
+      const sub = ipIf ? ipIf.ip! : stale ? "未连接" : "—";
+      nodes.push(
+        `<g data-host-id="${escapeHTML(n.host_id)}" style="cursor:pointer" filter="url(#${GLOW})">` +
+          `<title>${escapeHTML(nodeTitle(n))}</title>` +
+          `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${active ? 24 : 20}" fill="${NOC.nodeFill}" stroke="${col}" stroke-width="${active ? 2.6 : 1.6}"${stale ? ' stroke-dasharray="3 3"' : ""}/>` +
+          (n.is_hub
+            ? `<text x="${x.toFixed(1)}" y="${(y + 4).toFixed(1)}" text-anchor="middle" fill="#fbbf24" font-size="10" font-weight="700" style="pointer-events:none">HUB</text>`
+            : n.conflict
+              ? `<text x="${x.toFixed(1)}" y="${(y + 5).toFixed(1)}" text-anchor="middle" font-size="14" style="pointer-events:none">⚠</text>`
+              : "") +
+          `</g>` +
+          `<text x="${x.toFixed(1)}" y="${(y + 34).toFixed(1)}" text-anchor="middle" fill="${NOC.textDim}" font-size="11" font-weight="600" style="pointer-events:none">${escapeHTML(nm)}</text>` +
+          `<text x="${x.toFixed(1)}" y="${(y + 46).toFixed(1)}" text-anchor="middle" fill="${col}" font-size="9" style="pointer-events:none">${escapeHTML(sub)}</text>`,
+      );
+    });
+  }
+
+  // Central 交换机 / hub. A rounded rect (switch) or a ringed circle (hub),
+  // both glowing in the network accent, labeled with center.label + detail.
+  const isHub = net.center.shape === "hub";
+  const center = isHub
+    ? `<circle cx="${cx}" cy="${cy}" r="36" fill="${NOC.nodeFill}" stroke="${accent}" stroke-width="2.4" filter="url(#${GLOW})"/>` +
+      `<circle cx="${cx}" cy="${cy}" r="45" fill="none" stroke="${accent}" stroke-width="1" opacity="0.3"/>`
+    : // switch: rounded rect with three "port" ticks
+      `<rect x="${(cx - 46).toFixed(1)}" y="${(cy - 26).toFixed(1)}" width="92" height="52" rx="11" fill="${NOC.nodeFill}" stroke="${accent}" stroke-width="2.2" filter="url(#${GLOW})"/>` +
+      `<rect x="${(cx - 30).toFixed(1)}" y="${(cy + 14).toFixed(1)}" width="60" height="4" rx="2" fill="${accent}" opacity="0.55"/>`;
+  const centerLabel =
+    `<text x="${cx}" y="${(cy - 4).toFixed(1)}" text-anchor="middle" fill="${NOC.textBright}" font-size="13" font-weight="700" style="pointer-events:none">${escapeHTML(net.center.label)}</text>` +
+    (net.center.detail
+      ? `<text x="${cx}" y="${(cy + 9).toFixed(1)}" text-anchor="middle" fill="${accent}" font-size="9" style="pointer-events:none">${escapeHTML(net.center.detail)}</text>`
+      : "");
+
+  const svg = nocSvg({
+    width: W,
+    height: H,
+    inner: spokes.join("") + center + centerLabel + nodes.join(""),
+    ariaLabel: `${net.kind} network topology`,
+  });
+  hostsTopo.innerHTML = nocPanel({ svg });
+  hostsTopo.querySelectorAll<SVGElement>("[data-host-id]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const id = el.getAttribute("data-host-id");
+      if (id) void openHost(id);
+    });
+  });
+}
+
+// renderTopo dispatches to the fleet view ("all") or the selected network.
+function renderTopo(): void {
+  setActiveTopoTabUI();
+  if (activeTopoTab === "all") {
+    renderHostsTopo();
+    return;
+  }
+  const net = topology?.networks?.find((n) => n.kind === activeTopoTab);
+  if (!net) {
+    hostsTopo.innerHTML = `<div class="chat-empty">拓扑加载中…</div>`;
+    hostsTopoSummary.textContent = "—";
+    return;
+  }
+  renderNetworkTopo(net);
+}
+
+function setActiveTopoTabUI(): void {
+  TOPO_TABS.querySelectorAll<HTMLButtonElement>(".topo-tab").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tab === activeTopoTab);
+  });
+}
+
+TOPO_TABS.querySelectorAll<HTMLButtonElement>(".topo-tab").forEach((b) => {
+  b.addEventListener("click", () => {
+    activeTopoTab = (b.dataset.tab as TopoTab) || "all";
+    renderTopo();
+  });
+});
+
 // ── right drawer (host detail) ────────────────────────────────────────────
 function openDrawer(): void {
   hostsDrawer.style.transform = "translateX(0)";
@@ -438,7 +599,7 @@ function closeDrawer(): void {
   hostsDrawerBackdrop.hidden = true;
   activeHostId = null;
   activeHost = null;
-  renderHostsTopo();
+  renderTopo();
   renderHostsList();
 }
 hostsListToggle.addEventListener("click", () => {
@@ -910,7 +1071,13 @@ async function loadHosts(): Promise<void> {
     return;
   }
   hosts = data.hosts || [];
-  renderHostsTopo();
+  // Topology is best-effort + parallel-ish: a failure just leaves the network
+  // tabs empty, the fleet view still works.
+  const topoRes = await fetchHostsTopology();
+  if (topoRes.response.ok) {
+    topology = topoRes.data;
+  }
+  renderTopo();
   renderHostsList();
   if (activeHostId) {
     const stillExists = hosts.find((h) => h.id === activeHostId);
@@ -922,7 +1089,7 @@ async function loadHosts(): Promise<void> {
 
 async function openHost(id: string): Promise<void> {
   activeHostId = id;
-  renderHostsTopo(); // re-render to highlight the active node
+  renderTopo(); // re-render to highlight the active node (in whichever tab)
   renderHostsList();
   openDrawer();
   const { response, data } = await fetchHost(id);

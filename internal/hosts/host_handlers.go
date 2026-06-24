@@ -173,6 +173,23 @@ func (p *Plugin) handleHostList(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"hosts": hosts})
 }
 
+// handleHostsTopology builds the fleet's network topology (Thunderbolt / LAN /
+// WireGuard) for the active workspace from every host's host_info blob. Pure
+// read; see buildTopology + doc/arch/host-network-topology.md.
+func (p *Plugin) handleHostsTopology(c *gin.Context) {
+	workspaceID, ok := requireWorkspaceID(c)
+	if !ok {
+		return
+	}
+	topo, err := p.buildTopology(workspaceID)
+	if err != nil {
+		log.Printf("handleHostsTopology workspace=%s: %v", workspaceID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "服务器错误"})
+		return
+	}
+	c.JSON(http.StatusOK, topo)
+}
+
 func (p *Plugin) handleHostDetail(c *gin.Context) {
 	workspaceID, ok := requireWorkspaceID(c)
 	if !ok {

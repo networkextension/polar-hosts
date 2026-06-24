@@ -253,6 +253,7 @@ func (p *Plugin) RegisterRoutes(r gin.IRouter) {
 		{
 			auth.POST("/hosts/enroll", p.handleHostEnroll)
 			auth.GET("/hosts", p.handleHostList)
+			auth.GET("/hosts/topology", p.handleHostsTopology)
 			auth.GET("/hosts/:id", p.handleHostDetail)
 			auth.DELETE("/hosts/:id", p.handleHostDelete)
 
