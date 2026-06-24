@@ -55,10 +55,23 @@
             </div>
           </aside>
 
+          <style>
+            .topo-tab{font-size:12px;padding:4px 11px;border-radius:999px;cursor:pointer;
+              border:1px solid var(--border,#e5e7eb);background:transparent;color:var(--text-muted,#888);
+              transition:all .12s;white-space:nowrap;}
+            .topo-tab:hover{color:var(--text,#1f2329);}
+            .topo-tab.active{background:var(--accent,#0a84ff);border-color:var(--accent,#0a84ff);color:#fff;font-weight:600;}
+          </style>
           <!-- Main: fleet topology (landing view — 一眼尽收) -->
           <section style="flex:1; min-height:0; display:flex; flex-direction:column; overflow:hidden;">
-            <div style="display:flex; align-items:center; gap:8px; padding:12px 16px 6px;">
+            <div style="display:flex; align-items:center; gap:8px; padding:12px 16px 6px; flex-wrap:wrap;">
               <span class="badge">主机拓扑</span>
+              <div id="hostsTopoTabs" role="tablist" style="display:flex; gap:4px;">
+                <button class="topo-tab" data-tab="all" type="button">全部</button>
+                <button class="topo-tab" data-tab="thunderbolt" type="button">⚡ 雷电</button>
+                <button class="topo-tab" data-tab="lan" type="button">🏠 局域网</button>
+                <button class="topo-tab" data-tab="wg" type="button">🔒 WG Link</button>
+              </div>
               <span id="hostsTopoSummary" style="font-size:12px; color:var(--text-muted,#888);">—</span>
               <span style="flex:1;"></span>
               <button id="hostsFsBtn" class="btn-inline btn-secondary" type="button">⛶ 全屏</button>

@@ -77,6 +77,52 @@ export type HostListResponse = ErrorResponse & {
   hosts?: Host[];
 };
 
+// --- Network topology (GET /api/hosts/topology) — mirrors the Go shapes in
+// internal/hosts/topology.go. Three networks the UI renders as tabs. ---
+
+export type TopoIface = {
+  iface: string;
+  ip?: string;
+  mac?: string;
+  kind: string;
+  stale?: boolean; // un-cabled TB port / link with no address
+};
+
+export type TopoNode = {
+  host_id: string;
+  name: string;
+  online: boolean;
+  is_hub?: boolean; // this host IS the wg hub (10.88.0.1)
+  conflict?: boolean; // shares an IP with another host
+  ifaces: TopoIface[];
+};
+
+export type TopoCenter = {
+  shape: string; // "switch" | "hub"
+  label: string;
+  detail?: string;
+};
+
+export type TopoAnomaly = {
+  type: string;
+  detail: string;
+  hosts?: string[];
+};
+
+export type TopoNet = {
+  kind: string; // "thunderbolt" | "lan" | "wg"
+  label: string;
+  center: TopoCenter;
+  nodes: TopoNode[];
+  anomalies?: TopoAnomaly[];
+};
+
+export type Topology = ErrorResponse & {
+  networks?: TopoNet[];
+  host_count?: number;
+  generated_at?: string;
+};
+
 export type HostDetailResponse = ErrorResponse & {
   host?: Host;
 };

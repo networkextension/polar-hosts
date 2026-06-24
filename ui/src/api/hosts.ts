@@ -14,10 +14,17 @@ import type {
   HostSkillListResponse,
   HostSkillWithHost,
   HostSkillsWithHostListResponse,
+  Topology,
 } from "../types/hosts.js";
 
 export async function fetchHosts() {
   return requestJson<HostListResponse>("/api/hosts");
+}
+
+// Network topology (Thunderbolt / LAN / WG), built server-side from every
+// host's host_info. Drives the 拓扑 tabs. See GET /api/hosts/topology.
+export async function fetchHostsTopology() {
+  return requestJson<Topology>("/api/hosts/topology");
 }
 
 export async function fetchHost(id: string) {
