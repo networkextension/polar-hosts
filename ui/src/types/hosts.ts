@@ -33,6 +33,15 @@ export type HostInfo = {
   ipv4_by_iface?: Record<string, string>;
   ipv6_by_iface?: Record<string, { addr: string; private: boolean }[]>;
   wg_pubkeys?: Record<string, string>;
+  // Topology facts (agent ≥0.4). mac_by_iface covers EVERY non-loopback
+  // NIC — including IP-less ones (un-cabled Thunderbolt bridge0 + member
+  // ports) — so the UI can show physical ports that ipv4/ipv6_by_iface drop.
+  mac_by_iface?: Record<string, string>;
+  ipv4_cidr_by_iface?: Record<string, string>;
+  // "thunderbolt" | "wifi" | "ethernet" | "wg" | "mesh" | "other"
+  iface_kind?: Record<string, string>;
+  bridge_members?: Record<string, string[]>;
+  default_gw?: string;
 };
 
 export type Host = {
