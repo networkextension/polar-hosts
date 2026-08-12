@@ -239,7 +239,7 @@ function deviceBadge(h: Host, online: boolean): string {
 // thing renders on a self-contained dark "big-screen" panel (its own palette,
 // not the platform theme) so it reads like a data-center NOC widget.
 
-type NetKind = "wifi" | "ethernet" | "cellular" | "mesh" | "bridge" | "other";
+type NetKind = "wifi" | "ethernet" | "thunderbolt" | "cellular" | "mesh" | "bridge" | "other";
 
 interface NetIface {
   name: string;
@@ -249,6 +249,7 @@ interface NetIface {
   label: string;
   ipv4?: string;
   ipv6: { addr: string; private: boolean }[];
+  mac?: string; // hardware address — the only identity an IP-less port has
 }
 
 const NET_GLYPH: Record<NetKind, string> = {
@@ -261,6 +262,8 @@ const NET_GLYPH: Record<NetKind, string> = {
   // mesh/wg: shield
   mesh: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>',
   bridge: '<path d="M6 9v12"/><path d="M18 9v12"/><path d="M3 9a9 9 0 0 1 18 0"/><path d="M3 14h18"/>',
+  // thunderbolt: lightning bolt
+  thunderbolt: '<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>',
   other: '<circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>',
 };
 
@@ -269,12 +272,28 @@ const NET_COLOR: Record<NetKind, string> = {
   wifi: NEON.cyan,
   cellular: NEON.amber,
   ethernet: NEON.green,
+  thunderbolt: NEON.amber, // same hue as the fleet 雷电 tab
   mesh: NEON.violet,
   bridge: NEON.blue,
   other: NEON.slate,
 };
 
-function classifyIface(name: string, os: string, hasBattery?: boolean): { kind: NetKind; label: string } {
+function classifyIface(name: string, os: string, hasBattery?: boolean, reported?: string): { kind: NetKind; label: string } {
+  // Agent ≥0.4 reports an authoritative per-NIC kind (iface_kind, from
+  // `networksetup -listallhardwareports` on darwin) — trust it over the
+  // name heuristics below. "other"/empty falls through to the heuristics.
+  switch (reported) {
+    case "thunderbolt":
+      return { kind: "thunderbolt", label: /^bridge/.test(name) ? "雷电桥" : "雷电" };
+    case "wifi":
+      return { kind: "wifi", label: "Wi-Fi" };
+    case "ethernet":
+      return { kind: "ethernet", label: "以太网" };
+    case "wg":
+      return { kind: "mesh", label: "WG Mesh" };
+    case "mesh":
+      return { kind: "mesh", label: "Mesh" };
+  }
   const n = name.toLowerCase();
   if (/^(utun|wgc|wg)\d/.test(n) || n === "wg0") return { kind: "mesh", label: "WG Mesh" };
   if (/^(pdp_ip|rmnet|wwan|ppp|ce|qmi)/.test(n)) return { kind: "cellular", label: "蜂窝 / 4G" };
@@ -292,16 +311,24 @@ function collectIfaces(host: Host): NetIface[] {
   const info = host.host_info || {};
   const v4 = info.ipv4_by_iface || {};
   const v6 = info.ipv6_by_iface || {};
-  const names = new Set<string>([...Object.keys(v4), ...Object.keys(v6)]);
+  const macs = info.mac_by_iface || {};
+  const kinds = info.iface_kind || {};
+  // mac_by_iface (agent ≥0.4) covers EVERY non-loopback NIC — including
+  // IP-less ones like an un-cabled Thunderbolt bridge0 + its member ports —
+  // so union it in; the old v4/v6-only union silently hid those.
+  const names = new Set<string>([...Object.keys(v4), ...Object.keys(v6), ...Object.keys(macs)]);
   const out: NetIface[] = [];
   for (const name of names) {
     if (/^lo\d*$|^lo$|^utun[0-3]$/.test(name) && !(v4[name] || (v6[name] || []).length)) continue;
     if (name === "lo" || name === "lo0") continue;
-    const { kind, label } = classifyIface(name, host.os, host.host_info?.has_battery);
-    out.push({ name, kind, label, color: NET_COLOR[kind], glyph: NET_GLYPH[kind], ipv4: v4[name], ipv6: v6[name] || [] });
+    const hasAddr = !!(v4[name] || (v6[name] || []).length);
+    const { kind, label } = classifyIface(name, host.os, host.host_info?.has_battery, kinds[name]);
+    // IP-less tunnels/unknowns are noise; IP-less hardware ports are signal.
+    if (!hasAddr && (kind === "mesh" || kind === "other")) continue;
+    out.push({ name, kind, label, color: NET_COLOR[kind], glyph: NET_GLYPH[kind], ipv4: v4[name], ipv6: v6[name] || [], mac: macs[name] });
   }
-  // physical first (wifi, cellular, ethernet, bridge, other), mesh last
-  const rank: Record<NetKind, number> = { wifi: 0, cellular: 1, ethernet: 2, bridge: 3, other: 4, mesh: 5 };
+  // physical first (wifi, cellular, ethernet, thunderbolt, bridge, other), mesh last
+  const rank: Record<NetKind, number> = { wifi: 0, cellular: 1, ethernet: 2, thunderbolt: 3, bridge: 4, other: 5, mesh: 6 };
   out.sort((a, b) => rank[a.kind] - rank[b.kind] || a.name.localeCompare(b.name));
   return out;
 }
@@ -332,7 +359,7 @@ function renderHostNet(host: Host, online: boolean): void {
     const { x, y } = pts[i];
     const labelRight = x >= cx;
     const lx = x + (labelRight ? 14 : -14);
-    const ip = f.ipv4 || (f.ipv6[0] && f.ipv6[0].addr) || "";
+    const ip = f.ipv4 || (f.ipv6[0] && f.ipv6[0].addr) || f.mac || "";
     const anchor = labelRight ? "start" : "end";
     return (
       `<g filter="url(#${GLOW})"><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="16" fill="${NOC.nodeFill}" stroke="${f.color}" stroke-width="1.6"/>` +
@@ -369,8 +396,16 @@ function renderHostNet(host: Host, online: boolean): void {
         )
         .join("<br>");
       if (v6) lines.push(`<div style="margin-top:2px">${v6}</div>`);
-      if (f.kind === "wifi" && wifiMac) {
-        lines.push(`<div style="font-family:monospace;font-size:10px;color:${NOC.textMuted}">MAC ${escapeHTML(wifiMac)}</div>`);
+      if (!f.ipv4 && !f.ipv6.length) {
+        lines.push(`<div style="font-size:10px;color:${NOC.textMuted}">未插线 / 无 IP</div>`);
+      }
+      const mac = f.mac || (f.kind === "wifi" ? wifiMac : undefined);
+      if (mac) {
+        lines.push(`<div style="font-family:monospace;font-size:10px;color:${NOC.textMuted}">MAC ${escapeHTML(mac)}</div>`);
+      }
+      const members = host.host_info?.bridge_members?.[f.name];
+      if (members?.length) {
+        lines.push(`<div style="font-size:10px;color:${NOC.textMuted}">成员 ${members.map(escapeHTML).join(" · ")}</div>`);
       }
       return nocChip({ color: f.color, glyph: f.glyph, name: f.name, badge: f.label, lines });
     })
