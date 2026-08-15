@@ -838,6 +838,16 @@ func (p *Plugin) deleteHost(hostID string) error {
 // the local agent_tokens table and have polar-hosts read tokens back
 // from dock via a new SDK GET surface.
 func (p *Plugin) createEnrollmentToken(userID, workspaceID, hostName string, now time.Time) (string, string, time.Time, error) {
+	return p.createEnrollmentTokenTTL(userID, workspaceID, hostName, enrollmentTokenTTL, now)
+}
+
+// createEnrollmentTokenTTL is createEnrollmentToken with an explicit
+// validity window. The interactive flow keeps the 1h default; the
+// machine-minted flow (/internal/v1/hosts/enroll) may ask for longer.
+func (p *Plugin) createEnrollmentTokenTTL(userID, workspaceID, hostName string, ttl time.Duration, now time.Time) (string, string, time.Time, error) {
+	if ttl <= 0 {
+		ttl = enrollmentTokenTTL
+	}
 	userID = strings.TrimSpace(userID)
 	workspaceID = strings.TrimSpace(workspaceID)
 	hostName = strings.TrimSpace(hostName)
@@ -848,7 +858,7 @@ func (p *Plugin) createEnrollmentToken(userID, workspaceID, hostName string, now
 	if err != nil {
 		return "", "", time.Time{}, err
 	}
-	expiresAt := now.Add(enrollmentTokenTTL)
+	expiresAt := now.Add(ttl)
 	marker := pendingEnrollmentMarker{
 		PendingEnrollment: true,
 		WorkspaceID:       workspaceID,
