@@ -23,6 +23,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -33,13 +34,17 @@ import (
 )
 
 type Plugin struct {
-	DB         *sql.DB
-	Dock       *sdk.Client
-	Name       string
-	Listen     string
-	Ver        string
-	BlobDir    string // $POLAR_HOSTS_BLOB_DIR — agent install scripts, skill logs
-	MetricsTok string
+	// createdByCache: host_id → user_id credited on auto-created host_skills
+	// rows (see resolveHostCreatedBy). sync.Map because touch/advertise is
+	// concurrent per host.
+	createdByCache sync.Map
+	DB             *sql.DB
+	Dock           *sdk.Client
+	Name           string
+	Listen         string
+	Ver            string
+	BlobDir        string // $POLAR_HOSTS_BLOB_DIR — agent install scripts, skill logs
+	MetricsTok     string
 
 	// SystemWorkspaceID is dock's "system" user's personal team.
 	// Pre-fetched once at New() via /internal/v1/users/system/workspace

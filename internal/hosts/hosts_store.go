@@ -654,16 +654,7 @@ func (p *Plugin) ensureHostSkillFromAdvertise(hostID string, skill AdvertisedSki
 	// If the host has no agent_token_id (defensive: shouldn't happen in
 	// practice since register() always sets it), fall back to the
 	// workspace owner.
-	var createdBy string
-	err = p.DB.QueryRow(`
-		SELECT COALESCE(
-			(SELECT at.user_id FROM agent_tokens at
-			 JOIN hosts h ON h.agent_token_id = at.id
-			 WHERE h.id = $1),
-			(SELECT t.owner_user_id FROM teams t
-			 JOIN hosts h ON h.workspace_id = t.id
-			 WHERE h.id = $1)
-		)`, hostID).Scan(&createdBy)
+	createdBy, err := p.resolveHostCreatedBy(hostID)
 	if err != nil {
 		return 0, fmt.Errorf("resolve created_by for host=%s: %w", hostID, err)
 	}
@@ -1096,4 +1087,46 @@ func (p *Plugin) uniqueHostSlugInWorkspace(workspaceID, name string) (string, er
 		candidate = fmt.Sprintf("%s-%d", base, i)
 	}
 	return "", errors.New("could not find free slug after 50 attempts")
+}
+
+// resolveHostCreatedBy picks the user to credit auto-created host_skills
+// rows to. Order: (1) the local agent_tokens row the host points at
+// (enroll-token era); (2) the workspace owner via dock (`TeamGet`) — the
+// v4 register path mints the real agent token in dock only, so the local
+// join misses and there is NO `teams` table in polar_hosts (the previous
+// fallback query errored with 42P01 and every advertised skill was
+// silently dropped for v4 hosts). Cached per host for the process
+// lifetime; touch/advertise hits this every 60s per skill.
+func (p *Plugin) resolveHostCreatedBy(hostID string) (string, error) {
+	if v, ok := p.createdByCache.Load(hostID); ok {
+		return v.(string), nil
+	}
+	var createdBy sql.NullString
+	err := p.DB.QueryRow(`
+		SELECT at.user_id FROM agent_tokens at
+		 JOIN hosts h ON h.agent_token_id = at.id
+		 WHERE h.id = $1`, hostID).Scan(&createdBy)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	if createdBy.Valid && strings.TrimSpace(createdBy.String) != "" {
+		p.createdByCache.Store(hostID, createdBy.String)
+		return createdBy.String, nil
+	}
+	var workspaceID string
+	if err := p.DB.QueryRow(`SELECT workspace_id FROM hosts WHERE id = $1`, hostID).Scan(&workspaceID); err != nil {
+		return "", err
+	}
+	if p.Dock == nil {
+		return "", nil
+	}
+	team, err := p.Dock.TeamGet(workspaceID)
+	if err != nil {
+		return "", fmt.Errorf("dock TeamGet(%s): %w", workspaceID, err)
+	}
+	if team == nil || strings.TrimSpace(team.OwnerUserID) == "" {
+		return "", nil
+	}
+	p.createdByCache.Store(hostID, team.OwnerUserID)
+	return team.OwnerUserID, nil
 }
