@@ -178,9 +178,12 @@ func (p *Plugin) runAgentReadPump(conn *websocket.Conn, ac *agentConn) {
 		switch head.Kind {
 		case "hello":
 			var h struct {
-				Capabilities []string `json:"capabilities"`
-				Tool         string   `json:"tool"`
-				Workdir      string   `json:"workdir,omitempty"`
+				Capabilities []string        `json:"capabilities"`
+				Tool         string          `json:"tool"`
+				Workdir      string          `json:"workdir,omitempty"`
+				HostInfo     json.RawMessage `json:"host_info,omitempty"`
+				MemPeakBytes int64           `json:"mem_peak_bytes,omitempty"`
+				CPUPeakPct   float64         `json:"cpu_peak_pct,omitempty"`
 			}
 			if err := json.Unmarshal(raw, &h); err == nil {
 				ac.capabilities = h.Capabilities
@@ -196,6 +199,24 @@ func (p *Plugin) runAgentReadPump(conn *websocket.Conn, ac *agentConn) {
 			if ac.hostID == "" {
 				if host, herr := p.getHostByAgentToken(ac.tokenID); herr == nil && host != nil {
 					ac.hostID = host.ID
+				}
+			}
+			// Phase 4b: with agents attached here (not dock), the static
+			// host_info blob + capacity peaks + agents.last_hello_at must be
+			// persisted by us — same work /internal/v1/hosts/hello does when
+			// dock forwards. Best-effort, never fails the hello.
+			if ac.hostID != "" {
+				now := time.Now().UTC()
+				if len(h.HostInfo) > 0 && json.Valid(h.HostInfo) {
+					if _, uerr := p.updateHostInfo(ac.hostID, h.HostInfo, now); uerr != nil {
+						log.Printf("[agent ws] hello host_info persist host=%s: %v", ac.hostID, uerr)
+					}
+				}
+				if h.MemPeakBytes > 0 || h.CPUPeakPct > 0 {
+					_ = p.updateHostCapacityPeaks(ac.hostID, h.MemPeakBytes, h.CPUPeakPct, now)
+				}
+				if ac.agentID != "" {
+					_ = p.updateAgentLastHelloAt(ac.agentID, now)
 				}
 			}
 
@@ -258,6 +279,16 @@ func (p *Plugin) runAgentReadPump(conn *websocket.Conn, ac *agentConn) {
 					}
 				}
 				continue
+			}
+			// Phase 4b: wireguard skill peer-status metrics used to land in
+			// dock's wgPeerCache straight off dock's /ws/agent read pump.
+			// Now that agents attach here, push them to dock's existing
+			// POST /internal/v1/wg-peer-status (plugin HMAC) so polar-wg's
+			// hub-status pipeline keeps working. Fire-and-forget.
+			if ev.EventKind == "metric" {
+				if kind, _ := ev.Data["kind"].(string); kind == "wg_peer_status" {
+					go p.forwardWGPeerStatusToDock(ac.hostID, ev.Data)
+				}
 			}
 			ac.deliverSkillEvent(ev)
 
