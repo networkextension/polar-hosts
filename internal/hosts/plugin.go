@@ -246,6 +246,7 @@ func (p *Plugin) RegisterRoutes(r gin.IRouter) {
 	r.POST("/internal/v1/agents/dispatch/tool-call", p.handleInternalAgentDispatchToolCall)
 	r.POST("/internal/v1/agents/dispatch/chat-message", p.handleInternalAgentDispatchChatMessage)
 	r.POST("/internal/v1/agents/dispatch/frame", p.handleInternalAgentDispatchFrame)
+	r.POST("/internal/v1/agents/kick", p.handleInternalAgentKick)
 
 	// Mirror dock's /api/hosts/* + /api/host-skills/* + /api/console/*
 	// routes so nginx can flip with a single proxy_pass redirect
