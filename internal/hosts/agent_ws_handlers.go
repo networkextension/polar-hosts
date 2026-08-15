@@ -58,10 +58,7 @@ func (p *Plugin) handleAgentWS(c *gin.Context) {
 	// Resolve host for this token. A token without a hosts row is allowed
 	// (legacy path before /api/hosts/register); hostID is updated lazily
 	// when the agent sends skill.advertise.
-	hostID := ""
-	if host, err := p.getHostByAgentToken(tokenID); err == nil && host != nil {
-		hostID = host.ID
-	}
+	hostID := p.resolveHostIDForAgentConn(tokenID, agentID, botUserID)
 
 	conn, err := agentWSUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -95,7 +92,10 @@ func (p *Plugin) handleAgentWS(c *gin.Context) {
 
 // verifyAgentToken calls dock's internal RPC to resolve a raw bearer token.
 func (p *Plugin) verifyAgentToken(raw string) (tokenID, userID string, err error) {
-	body, _ := json.Marshal(map[string]string{"token": raw})
+	// sdk.Do JSON-marshals `body` itself — passing pre-marshalled bytes
+	// double-encodes them into a base64 string and dock answers 400
+	// "token required" (→ every agent got 401 at the Phase 4b cutover).
+	body := map[string]string{"token": raw}
 	resp, err := p.Dock.Do(http.MethodPost, "/internal/v1/agent-tokens/verify", body)
 	if err != nil {
 		return "", "", err
@@ -197,9 +197,7 @@ func (p *Plugin) runAgentReadPump(conn *websocket.Conn, ac *agentConn) {
 			}
 			// Lazily resolve hostID on hello if not already set.
 			if ac.hostID == "" {
-				if host, herr := p.getHostByAgentToken(ac.tokenID); herr == nil && host != nil {
-					ac.hostID = host.ID
-				}
+				ac.hostID = p.resolveHostIDForAgentConn(ac.tokenID, ac.agentID, ac.botUserID)
 			}
 			// Phase 4b: with agents attached here (not dock), the static
 			// host_info blob + capacity peaks + agents.last_hello_at must be
@@ -245,12 +243,11 @@ func (p *Plugin) runAgentReadPump(conn *websocket.Conn, ac *agentConn) {
 				continue
 			}
 			if ac.hostID == "" {
-				host, herr := p.getHostByAgentToken(ac.tokenID)
-				if herr != nil || host == nil {
-					log.Printf("[agent ws] skill.advertise token=%s has no host row, dropping %d skills", ac.tokenID, len(msg.Skills))
+				ac.hostID = p.resolveHostIDForAgentConn(ac.tokenID, ac.agentID, ac.botUserID)
+				if ac.hostID == "" {
+					log.Printf("[agent ws] skill.advertise token=%s agent=%s has no host row, dropping %d skills", ac.tokenID, ac.agentID, len(msg.Skills))
 					continue
 				}
-				ac.hostID = host.ID
 			}
 			now := time.Now().UTC()
 			remoteIP := c2ip(conn.RemoteAddr().String())
