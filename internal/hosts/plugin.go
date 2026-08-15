@@ -229,6 +229,9 @@ func (p *Plugin) RegisterRoutes(r gin.IRouter) {
 	// See internal_touch.go.
 	r.POST("/internal/v1/hosts/touch", p.handleInternalHostTouch)
 	r.POST("/internal/v1/hosts/hello", p.handleInternalHostsHello)
+	// polar-cloud: machine-minted enrollment tokens for VMs that must
+	// self-register on first boot. Loopback-only. See internal_enroll.go.
+	r.POST("/internal/v1/hosts/enroll", p.handleInternalHostsEnroll)
 	r.GET("/internal/v1/skill-catalog/:id", p.handleInternalSkillCatalogGet)
 
 	// Phase 4b: dock calls these after the /ws/agent nginx cutover so the
