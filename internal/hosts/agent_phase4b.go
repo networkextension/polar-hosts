@@ -78,3 +78,42 @@ func (p *Plugin) handleInternalAgentKick(c *gin.Context) {
 	log.Printf("[agent ws] kicked by dock: token=%s bot=%s agent=%s", conn.tokenID, conn.botUserID, conn.agentID)
 	c.JSON(http.StatusOK, gin.H{"kicked": true})
 }
+
+// resolveHostIDForAgentConn maps a connecting agent to its hosts.id.
+// Order: (1) agents.agent_token_id = token (canonical v4 link);
+// (2) agents.id = agent_id from the connect query — robust when our copy
+// of agents.agent_token_id is stale (dock re-minted the token on a
+// re-register and the dual-write missed; observed on zen 2026-08-16);
+// (3) agents.bot_user_id = bot_id. On (2)/(3) we self-heal the stale
+// agent_token_id so the next connect hits (1). Empty when unknown.
+func (p *Plugin) resolveHostIDForAgentConn(tokenID, agentID, botUserID string) string {
+	if host, err := p.getHostByAgentToken(tokenID); err == nil && host != nil {
+		return host.ID
+	}
+	var hostID string
+	if agentID != "" {
+		if err := p.DB.QueryRow(`SELECT host_id FROM agents WHERE id = $1 LIMIT 1`, agentID).Scan(&hostID); err == nil && hostID != "" {
+			p.healAgentTokenLink(agentID, tokenID)
+			return hostID
+		}
+	}
+	if botUserID != "" {
+		var aid string
+		if err := p.DB.QueryRow(`SELECT id, host_id FROM agents WHERE bot_user_id = $1 ORDER BY last_hello_at DESC NULLS LAST LIMIT 1`, botUserID).Scan(&aid, &hostID); err == nil && hostID != "" {
+			p.healAgentTokenLink(aid, tokenID)
+			return hostID
+		}
+	}
+	return ""
+}
+
+func (p *Plugin) healAgentTokenLink(agentID, tokenID string) {
+	if agentID == "" || tokenID == "" {
+		return
+	}
+	if _, err := p.DB.Exec(`UPDATE agents SET agent_token_id = $2 WHERE id = $1 AND (agent_token_id IS DISTINCT FROM $2)`, agentID, tokenID); err != nil {
+		log.Printf("[agent ws] heal agents.agent_token_id agent=%s: %v", agentID, err)
+	} else {
+		log.Printf("[agent ws] healed agents.agent_token_id agent=%s token=%s", agentID, tokenID)
+	}
+}
