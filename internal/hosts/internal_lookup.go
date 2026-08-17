@@ -70,9 +70,15 @@ func (p *Plugin) handleInternalHostLookup(c *gin.Context) {
 	if conn := p.agentHub.lookupByHostID(h.ID); conn != nil {
 		online = true
 	}
+	// OS facts from the agent's host_info (sw_vers on darwin): polar-cloud uses
+	// them as a placement predicate for macOS guests (host ≥ 14.1, not NonUI).
+	var osVersion, osBuild, osReleaseType string
+	_ = p.DB.QueryRow(`SELECT COALESCE(host_info_json->>'os_version',''), COALESCE(host_info_json->>'os_build',''),
+		COALESCE(host_info_json->>'os_release_type','') FROM hosts WHERE id = $1`, h.ID).Scan(&osVersion, &osBuild, &osReleaseType)
 	c.JSON(http.StatusOK, gin.H{
 		"host": gin.H{
 			"id": h.ID, "workspace_id": h.WorkspaceID, "name": h.Name, "os": h.OS, "arch": h.Arch,
+			"os_version": osVersion, "os_build": osBuild, "os_release_type": osReleaseType,
 			"last_seen_at": h.LastSeenAt, "last_seen_ip": h.LastSeenIP, "created_at": h.CreatedAt,
 		},
 		"online": online,
