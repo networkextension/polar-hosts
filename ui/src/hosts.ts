@@ -61,6 +61,7 @@ const hostsTopoSummary = byId<HTMLElement>("hostsTopoSummary");
 const hostsListAside = byId<HTMLElement>("hostsListAside");
 const hostsListToggle = byId<HTMLButtonElement>("hostsListToggle");
 const hostsFsBtn = byId<HTMLButtonElement>("hostsFsBtn");
+const hostsViewBtn = byId<HTMLButtonElement>("hostsViewBtn");
 const hostsDrawer = byId<HTMLElement>("hostsDrawer");
 const hostsDrawerBackdrop = byId<HTMLElement>("hostsDrawerBackdrop");
 const hostsDrawerClose = byId<HTMLButtonElement>("hostsDrawerClose");
@@ -104,6 +105,8 @@ const logoutBtn = byId<HTMLButtonElement>("logoutBtn");
 let hosts: Host[] = [];
 let activeHostId: string | null = null;
 let activeHost: Host | null = null;
+// 拓扑视图模式:fleet = 现有舰队地图(默认,不动);switch = 交换机端口视图。两者来回切换。
+let topoView: "fleet" | "switch" = "fleet";
 // P1d: persistent host_skill rows + per-skill credential lists,
 // populated when a host is opened. Keyed by host_skill_id.
 let activeHostSkills: HostSkill[] = [];
@@ -426,6 +429,110 @@ function renderHostsTopo(): void {
   });
 }
 
+// ── 交换机视图 (switch-and-ports — 一台交换机,设备挂在端口上,在线端口闪烁) ──
+// An alternate landing view of the SAME fleet: a single core-switch chassis with
+// one port per host. Online hosts' ports pulse like link LEDs; offline ports stay
+// dim. Click a device → the same right drawer as the fleet map. Toggled with the
+// 视图 button (renderTopo); the fleet view above is left untouched.
+function renderHostsSwitch(): void {
+  if (!hosts.length) {
+    hostsTopo.innerHTML = `<div class="chat-empty">还没有主机。点右上角「＋ 注册主机」开始。</div>`;
+    hostsTopoSummary.textContent = "0 台";
+    return;
+  }
+  const onlineN = hosts.filter((h) => isOnline(h)).length;
+  hostsTopoSummary.textContent = `${hosts.length} 台 · ${onlineN} 在线 · ${hosts.length - onlineN} 离线`;
+
+  const GLOW = "noc-glow";
+  const N = hosts.length;
+  const pitch = 64; // 每台设备 / 每个端口的水平间距
+  const W = Math.max(1280, 160 + (N - 1) * pitch); // 设备多时变宽,SVG 自动缩放铺满
+  const H = 720;
+  const startX = (W - (N - 1) * pitch) / 2;
+
+  // 交换机机箱
+  const chassisH = 72;
+  const chassisY = 70;
+  const chassisX = startX - pitch / 2 + 6;
+  const chassisW = (N - 1) * pitch + pitch - 12;
+  const chassisBottom = chassisY + chassisH;
+  const portY = chassisBottom - 22; // 端口贴机箱下沿
+  const portW = 22;
+  const portH = 12;
+  const deviceY = 360;
+
+  const links: string[] = [];
+  const ports: string[] = [];
+  const nodes: string[] = [];
+
+  hosts.forEach((h, i) => {
+    const px = startX + i * pitch;
+    const online = isOnline(h);
+    const col = online ? NEON.green : NEON.slate;
+    const active = h.id === activeHostId;
+
+    // 端口 → 设备的连线
+    links.push(
+      nocSpoke({ x1: px, y1: chassisBottom, x2: px, y2: deviceY - 24, color: col, opacity: online ? 0.75 : 0.28 }),
+    );
+
+    // 端口 LED — 在线则闪烁(各端口错开相位,更像真实交换机)
+    const blink = online ? ` class="port-on" style="animation-delay:${((i % 6) * 0.16).toFixed(2)}s"` : "";
+    ports.push(
+      `<g filter="url(#${GLOW})"${blink}>` +
+        `<rect x="${(px - portW / 2).toFixed(1)}" y="${portY}" width="${portW}" height="${portH}" rx="2.5" ` +
+        `fill="${online ? col : NOC.nodeFill}" stroke="${col}" stroke-width="1.4"/>` +
+        (online ? `<circle cx="${px.toFixed(1)}" cy="${(portY + portH / 2).toFixed(1)}" r="2" fill="#06210f"/>` : "") +
+        `</g>`,
+    );
+
+    // 设备节点(可点击,沿用 fleet 的交互:打开右侧详情抽屉)
+    const glyph = deviceIconSVG(h, 22).replace(/stroke="#[0-9a-f]+"/i, `stroke="${col}"`);
+    const nm = h.name.length > 12 ? h.name.slice(0, 11) + "…" : h.name;
+    const sub = online ? "online" : "offline · " + formatRelative(h.last_seen_at);
+    const r = active ? 24 : 20;
+    nodes.push(
+      `<g data-host-id="${escapeHTML(h.id)}" style="cursor:pointer" filter="url(#${GLOW})">` +
+        `<circle cx="${px.toFixed(1)}" cy="${deviceY}" r="${r}" fill="${NOC.nodeFill}" stroke="${col}" stroke-width="${active ? 2.6 : 1.6}"/>` +
+        `<g transform="translate(${(px - 11).toFixed(1)},${(deviceY - 11).toFixed(1)})">${glyph}</g></g>` +
+        `<text x="${px.toFixed(1)}" y="${(deviceY + r + 16).toFixed(1)}" text-anchor="middle" fill="${NOC.textDim}" font-size="11" font-weight="600" style="pointer-events:none">${escapeHTML(nm)}</text>` +
+        `<text x="${px.toFixed(1)}" y="${(deviceY + r + 28).toFixed(1)}" text-anchor="middle" fill="${col}" font-size="9" style="pointer-events:none">${escapeHTML(sub)}</text>`,
+    );
+  });
+
+  // 机箱本体 + 标题 + 端口状态
+  const chassis =
+    `<rect x="${chassisX.toFixed(1)}" y="${chassisY}" width="${chassisW.toFixed(1)}" height="${chassisH}" rx="12" ` +
+    `fill="${NOC.nodeFill}" stroke="${NEON.cyan}" stroke-width="2" filter="url(#${GLOW})"/>` +
+    `<text x="${(chassisX + 14).toFixed(1)}" y="${(chassisY + 27).toFixed(1)}" fill="${NOC.textBright}" font-size="13" font-weight="700">核心交换机</text>` +
+    `<text x="${(chassisX + 14).toFixed(1)}" y="${(chassisY + 44).toFixed(1)}" fill="${NEON.cyan}" font-size="10" font-family="monospace">${onlineN}/${N} ports up</text>`;
+
+  // 端口闪烁动画(注入到 SVG 内,无需外部 CSS)
+  const style =
+    `<style>@keyframes portBlink{0%,100%{opacity:1}50%{opacity:.2}}` +
+    `.port-on{animation:portBlink 1.1s ease-in-out infinite}</style>`;
+
+  const svg = nocSvg({
+    width: W,
+    height: H,
+    inner: style + chassis + links.join("") + ports.join("") + nodes.join(""),
+    ariaLabel: "switch and devices",
+  });
+  hostsTopo.innerHTML = nocPanel({ svg });
+  hostsTopo.querySelectorAll<SVGElement>("[data-host-id]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const id = el.getAttribute("data-host-id");
+      if (id) void openHost(id);
+    });
+  });
+}
+
+// renderTopo — 在「舰队地图」(现有)与「交换机视图」(新增)之间分发,共用 #hostsTopo。
+function renderTopo(): void {
+  if (topoView === "switch") renderHostsSwitch();
+  else renderHostsTopo();
+}
+
 // ── right drawer (host detail) ────────────────────────────────────────────
 function openDrawer(): void {
   hostsDrawer.style.transform = "translateX(0)";
@@ -438,7 +545,7 @@ function closeDrawer(): void {
   hostsDrawerBackdrop.hidden = true;
   activeHostId = null;
   activeHost = null;
-  renderHostsTopo();
+  renderTopo();
   renderHostsList();
 }
 hostsListToggle.addEventListener("click", () => {
@@ -466,6 +573,12 @@ hostsFsBtn.addEventListener("click", () => {
   } else {
     (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el);
   }
+});
+// 视图切换:舰队地图 ⇄ 交换机端口视图(现有视图不动,来回切换)。
+hostsViewBtn.addEventListener("click", () => {
+  topoView = topoView === "fleet" ? "switch" : "fleet";
+  hostsViewBtn.textContent = topoView === "fleet" ? "⊞ 交换机" : "✦ 舰队";
+  renderTopo();
 });
 document.addEventListener("fullscreenchange", syncFsUI);
 document.addEventListener("webkitfullscreenchange", syncFsUI);
@@ -910,7 +1023,7 @@ async function loadHosts(): Promise<void> {
     return;
   }
   hosts = data.hosts || [];
-  renderHostsTopo();
+  renderTopo();
   renderHostsList();
   if (activeHostId) {
     const stillExists = hosts.find((h) => h.id === activeHostId);
@@ -922,7 +1035,7 @@ async function loadHosts(): Promise<void> {
 
 async function openHost(id: string): Promise<void> {
   activeHostId = id;
-  renderHostsTopo(); // re-render to highlight the active node
+  renderTopo(); // re-render to highlight the active node
   renderHostsList();
   openDrawer();
   const { response, data } = await fetchHost(id);
